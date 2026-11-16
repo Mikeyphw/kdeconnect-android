@@ -10,6 +10,13 @@ MR !789 head `56a0b2f28512696e600eaadbcbfd0a6dfe618aa4` is formatting only; rele
 - `assembleRelease`: `org.kde.kdeconnect_tp.mikey` (separate package; never overwrites F-Droid/Google Play or KDE official APK). Production releases **require a stable secret keystore**. Every update must reuse the exact original signing key. Pairing data does not transfer automatically between distinct packages.
 - Source is GPL; attribution remains in the contributor's original tile source and in the adapted service comment.
 
+## Android compatibility for Shizuku builds
+
+- **Minimum API: 24 (Android 7.0)** for the community fork. The official KDE Connect baseline still supports API 23 (Android 6.0); **this is an intentional support change**, not an upstream KDE requirement.
+- The shipped `dev.rikka.shizuku:api:13.1.5` and `:provider:13.1.5` libraries require API 24. The PR's original API-23 setting failed `processDebugMainManifest` in hosted CI; a one-off `tools:overrideLibrary` would suppress the diagnostic without demonstrating runtime compatibility, so it is explicitly forbidden.
+- Shizuku is still optional **at runtime** (normal Android APK installation does not require Shizuku), but the APK embeds its library and therefore cannot be installed below API 24. A future API-23 build would need a separately validated flavor/module that excludes the incompatible libraries, not a silent manifest override.
+- CI must compile the actual debug variant and run the required source compatibility tests; neither static checks nor successful AIDL generation count as proof that the full Android build passes.
+
 ## Release requirements
 
 Configure repository Actions secrets `KDE_FORK_KEYSTORE_BASE64`, `KDE_FORK_STORE_PASSWORD`, `KDE_FORK_KEY_ALIAS`, `KDE_FORK_KEY_PASSWORD`, `KDE_FORK_SIGNING_CERT_SHA256` privately. Do not commit keystores, passwords or private keys. Back up the keystore offline; losing it makes all future in-place updates impossible.

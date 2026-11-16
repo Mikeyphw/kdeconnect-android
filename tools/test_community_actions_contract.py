@@ -137,5 +137,43 @@ class CommunityWorkflowContractTests(unittest.TestCase):
                     self.check_installer_aidl(source.replace(original, replacement))
 
 
+    @staticmethod
+    def check_shizuku_min_sdk_contract(gradle):
+        """The 13.1.5 AARs require API 24; keep Shizuku and AIDL build-time contracts explicit."""
+        matches = re.findall(r"(?m)^\s*minSdk\s*=\s*(\d+)\s*$", gradle)
+        if matches != ["24"]:
+            raise ValueError("Community APK must declare minSdk 24 for Shizuku API 13.1.5")
+        for artifact in ("api", "provider"):
+            needle = f'implementation("dev.rikka.shizuku:{artifact}:13.1.5")'
+            if gradle.count(needle) != 1:
+                raise ValueError(f"Missing or changed official Shizuku {artifact} dependency")
+        if len(re.findall(r"(?m)^\s*aidl\s*=\s*true\s*$", gradle)) != 1:
+            raise ValueError("Exactly one enabled AIDL setting is required")
+        if "tools:overrideLibrary" in re.sub(r"(?m)^\s*//.*$", "", gradle):
+            raise ValueError("Unsafe Android minSdk override is forbidden")
+
+    def test_shizuku_min_sdk_and_aidl_contract(self):
+        source = (ROOT / "build.gradle.kts").read_text(encoding="utf-8")
+        self.check_shizuku_min_sdk_contract(source)
+        docs = (ROOT / "docs/COMMUNITY_BUILD_AND_UPDATES.md").read_text(encoding="utf-8")
+        self.assertIn("Minimum API: 24 (Android 7.0)", docs)
+        self.assertIn("API 23 (Android 6.0)", docs)
+
+    def test_shizuku_min_sdk_negative_regressions(self):
+        source = (ROOT / "build.gradle.kts").read_text(encoding="utf-8")
+        cases = (
+            source.replace("minSdk = 24", "minSdk = 23", 1),
+            source.replace('implementation("dev.rikka.shizuku:api:13.1.5")',
+                           'implementation("dev.rikka.shizuku:api:13.1.4")', 1),
+            source.replace('implementation("dev.rikka.shizuku:provider:13.1.5")', "", 1),
+            source.replace("aidl = true", "aidl = true\n        aidl = true", 1),
+            source.replace("aidl = true", "aidl = false", 1),
+            source + '\nandroid { tools:overrideLibrary="rikka.shizuku.api" }\n',
+        )
+        for case in cases:
+            with self.subTest(case=case[-100:]):
+                with self.assertRaises(ValueError):
+                    self.check_shizuku_min_sdk_contract(case)
+
 if __name__ == "__main__":
     unittest.main()

@@ -39,7 +39,10 @@ android {
     compileSdk = 37
     defaultConfig {
         applicationId = "org.kde.kdeconnect_tp"
-        minSdk = 23
+        // Shizuku API/provider 13.1.5 requires API 24 (verified by hosted manifest merger).
+        // Do not bypass the library contract using tools:overrideLibrary.
+        // Upstream KDE Connect continues to support API 23; this community fork does not.
+        minSdk = 24
         targetSdk = 37
         versionCode = System.getenv("KDE_FORK_VERSION_CODE")?.toIntOrNull() ?: 13703
         versionName = "1.37.3"
@@ -50,7 +53,6 @@ android {
         aidl = true
         viewBinding = true
         compose = true
-        aidl = true
         buildConfig = true
     }
 
