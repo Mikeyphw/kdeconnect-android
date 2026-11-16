@@ -41,3 +41,14 @@ Quit KDE Connect turns off background networking and remains stopped across syst
 - `upstream-sync.yml` opens a **review PR** from an immutable per-upstream-commit branch; no auto-merge or force-push. Conflicts fail closed.
 - `community-release.yml` requires private signing secrets and explicit manual dispatch. Android tests/lint/build and installed-device validation are distinct gates.
 - Current limitation: no hosted Gradle build or Android 16 device test was executed in the artifact preparation environment. Shizuku PackageInstaller UserService must be tested with real Shizuku and Sui (including failure/cancellation/confirmation), and release signatures and versionCode monotonicity must be validated end to end before production release.
+
+
+## Hosted CI lint artifact retention
+
+The GitHub PR CI job runs mandatory `testDebugUnitTest lintDebug assembleDebug`.
+A failure is **not** treated as success. A separate `if: always()` upload step
+retains complete Lint XML/HTML/SARIF, Lint text and test XML reports (when
+produced), so existing upstream debt and community-fork regressions can be
+classified before choosing fixes. No lint severity, security diagnostic,
+`abortOnError` or gate is disabled. A non-green run remains unqualified and
+must not be merged or released. Diagnostics are retained for 14 days.

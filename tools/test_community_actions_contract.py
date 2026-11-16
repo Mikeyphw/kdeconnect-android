@@ -177,3 +177,41 @@ class CommunityWorkflowContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FullLintDiagnosticsContractTests(unittest.TestCase):
+    """Mandatory lint remains failing; its complete diagnostics are preserved."""
+
+    def test_failed_lint_report_is_uploaded_without_suppressing_failure(self):
+        workflow=(ROOT / '.github/workflows/android-ci.yml').read_text(encoding='utf-8')
+        self.check_contract(workflow)
+
+    @staticmethod
+    def check_contract(workflow):
+        marker='      - name: Upload full lint and test diagnostics\n'
+        if workflow.count(marker)!=1:
+            raise ValueError('Missing diagnostic-artifact step')
+        suffix=workflow.split(marker,1)[1].split('      - name: Upload debug APK',1)[0]
+        needed=('if: always()', 'actions/upload-artifact@v4',
+                'build/reports/lint-results-debug.xml',
+                'build/reports/lint-results-debug.sarif',
+                'build/intermediates/lint_intermediate_text_report/**/lint-results-debug.txt',
+                'build/test-results/testDebugUnitTest/**/*.xml',
+                'if-no-files-found: warn')
+        for token in needed:
+            if token not in suffix:raise ValueError('Missing mandatory evidence token '+token)
+        if ('-Pci testDebugUnitTest lintDebug assembleDebug' not in workflow or
+                'continue-on-error:' in workflow or
+                'lintDebug --continue' in workflow):
+            raise ValueError('CI must still fail when lint or tests fail')
+        if 'if: success()' not in workflow.split('      - name: Upload debug APK',1)[1]:
+            raise ValueError('Debug artifact must remain gated by successful build')
+
+    def test_diagnostic_step_negative_tampering_refused(self):
+        workflow=(ROOT / '.github/workflows/android-ci.yml').read_text(encoding='utf-8')
+        for mutated in (workflow.replace('if: always()', 'if: success()',1),
+                        workflow.replace('lintDebug ', '',1),
+                        workflow.replace('if-no-files-found: warn', 'if-no-files-found: ignore',1),
+                        workflow+'\n      continue-on-error: true\n'):
+            with self.subTest(mutated=mutated[-80:]):
+                with self.assertRaises(ValueError):self.check_contract(mutated)
