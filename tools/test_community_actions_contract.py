@@ -3,11 +3,14 @@
 Run without third-party modules: python3 -m unittest discover -s tools -p test_community_actions_contract.py
 """
 from pathlib import Path
+import copy
+import json
 import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SDK_ACTION_COMMIT = "be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd"  # v4.0.4
+REQUIRED_WORKFLOW_ID = 420422186  # GitHub verified numeric workflow identity
 
 
 class CommunityWorkflowContractTests(unittest.TestCase):
@@ -48,6 +51,90 @@ class CommunityWorkflowContractTests(unittest.TestCase):
                 self.assertIn(marker, source)
         self.assertNotIn("  push:", source)
         self.assertNotIn("  pull_request:", source)
+
+
+    @staticmethod
+    def check_required_ci_contract(policy, workflow):
+        """Fail closed when the committed CI authority drifts from the PR workflow."""
+        expected = {
+            "schema_version": 1,
+            "repository": "Mikeyphw/kdeconnect-android",
+            "base_branch": "master",
+            "event": "pull_request",
+            "release_qualification": "separate",
+            "required_workflows": [
+                {"name": "Android community build", "workflow_id": REQUIRED_WORKFLOW_ID}
+            ],
+        }
+        if policy != expected:
+            raise ValueError("Required-CI policy differs from reviewed GitHub identity")
+        if not re.search(r"(?m)^name: Android community build\s*$", workflow):
+            raise ValueError("Required workflow name missing or changed")
+        if not re.search(r"(?m)^  pull_request:[ \t]*(?:\n  [a-z_]+:|\npermissions:)", workflow):
+            raise ValueError("Pull-request trigger missing or filtered")
+        if not re.search(r"(?m)^  push:\s*$", workflow):
+            raise ValueError("Expected push trigger was removed")
+        if not re.search(r"(?m)^  workflow_dispatch:\s*$", workflow):
+            raise ValueError("Manual build trigger was removed")
+        if not re.search(r"(?m)^      - name: Validate community workflow contracts\s*$", workflow):
+            raise ValueError("Community workflow contract gate not executed")
+
+    def test_committed_required_ci_policy_matches_hosted_workflow(self):
+        policy = json.loads((ROOT / "config/delivery-required-ci.json").read_text(encoding="utf-8"))
+        workflow = self.workflows()[0].read_text(encoding="utf-8")
+        self.check_required_ci_contract(policy, workflow)
+
+    def test_required_ci_policy_negative_drift(self):
+        policy = json.loads((ROOT / "config/delivery-required-ci.json").read_text(encoding="utf-8"))
+        workflow = self.workflows()[0].read_text(encoding="utf-8")
+        for key, value in (
+            ("repository", "OtherUser/kdeconnect-android"),
+            ("base_branch", "main"),
+            ("event", "push"),
+            ("release_qualification", "automatic"),
+        ):
+            with self.subTest(key=key):
+                wrong = copy.deepcopy(policy)
+                wrong[key] = value
+                with self.assertRaises(ValueError):
+                    self.check_required_ci_contract(wrong, workflow)
+        for mismatch in ({"name": "Wrong CI", "workflow_id": REQUIRED_WORKFLOW_ID},
+                         {"name": "Android community build", "workflow_id": REQUIRED_WORKFLOW_ID + 1}):
+            with self.subTest(mismatch=mismatch):
+                wrong = copy.deepcopy(policy)
+                wrong["required_workflows"] = [mismatch]
+                with self.assertRaises(ValueError):
+                    self.check_required_ci_contract(wrong, workflow)
+        with self.assertRaises(ValueError):
+            self.check_required_ci_contract(policy, workflow.replace("  pull_request:", "  pull_request:\n    paths: ['*.md']"))
+
+    @staticmethod
+    def check_installer_aidl(source):
+        rows = re.findall(r"(?m)^\s*void\s+(\w+)\([^;]*\)\s*=\s*(\d+)\s*;\s*$", source)
+        expected = [
+            ("begin", "1"), ("chunk", "2"), ("commit", "3"),
+            ("abort", "4"), ("destroy", "16777114"),
+        ]
+        if rows != expected or len(re.findall(r"(?m)^\s*void\s+", source)) != len(expected):
+            raise ValueError("AIDL methods require unique explicit IDs; preserve Shizuku destroy transaction ID")
+
+    def test_privileged_installer_aidl_compiles_with_explicit_ids(self):
+        file = ROOT / "src/main/aidl/org/kde/kdeconnect/updates/IPrivilegedInstaller.aidl"
+        source = file.read_text(encoding="utf-8")
+        self.check_installer_aidl(source)
+
+    def test_privileged_installer_aidl_negative_missing_id(self):
+        file = ROOT / "src/main/aidl/org/kde/kdeconnect/updates/IPrivilegedInstaller.aidl"
+        source = file.read_text(encoding="utf-8")
+        for original, replacement in (
+            ("void abort() = 4;", "void abort();"),
+            ("void destroy() = 16777114;", "void destroy() = 4;"),
+            ("void chunk(in byte[] bytes) = 2;", "void chunk(in byte[] bytes) = 1;"),
+        ):
+            with self.subTest(replacement=replacement):
+                self.assertIn(original, source)
+                with self.assertRaises(ValueError):
+                    self.check_installer_aidl(source.replace(original, replacement))
 
 
 if __name__ == "__main__":
