@@ -36,6 +36,7 @@ import androidx.fragment.app.Fragment
 import androidx.preference.PreferenceManager
 import com.google.android.material.navigation.NavigationView
 import org.kde.kdeconnect.BackgroundService
+import org.kde.kdeconnect.updates.AutomaticUpdateCheck
 import org.kde.kdeconnect.Device
 import org.kde.kdeconnect.KdeConnect
 import org.kde.kdeconnect.extensions.setOnApplyWindowInsetsListenerCompat
@@ -100,6 +101,7 @@ class MainActivity : AppCompatActivity(), OnSharedPreferenceChangeListener {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         DeviceHelper.initializeDeviceId(this)
+        AutomaticUpdateCheck.onOpened(this)
 
         val root = binding.root
         setContentView(root)

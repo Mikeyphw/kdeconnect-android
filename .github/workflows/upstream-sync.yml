@@ -1,0 +1,49 @@
+# Open a reviewable PR on a new branch; never force-update or auto-merge user work.
+name: Propose upstream KDE updates
+on:
+  schedule:
+    - cron: '17 8 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: kde-upstream-sync
+  cancel-in-progress: false
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Compare and propose review branch (no history rewriting)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REPOSITORY}" = 'Mikeyphw/kdeconnect-android'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/KDE/kdeconnect-android.git
+          git fetch --no-tags upstream master
+          SHA=$(git rev-parse FETCH_HEAD)
+          if git merge-base --is-ancestor "$SHA" HEAD; then
+            echo 'No upstream change to propose'; exit 0
+          fi
+          branch="sync/upstream-${SHA:0:12}"
+          if git ls-remote --exit-code --heads origin "$branch"; then
+            echo "Existing review branch: $branch"; exit 0
+          fi
+          git switch -c "$branch"
+          git merge --no-edit "$SHA" || {
+            echo 'Upstream merge conflict. Manual review required; no PR or push performed.' >&2
+            exit 1
+          }
+          git push origin "HEAD:refs/heads/$branch"
+          gh pr create --base master --head "$branch" \
+            --title "Review upstream KDE Connect ${SHA:0:12}" \
+            --body "Automated upstream merge proposal. Contributor Quit behavior, updater, release signing, and Shizuku installer must pass CI and be reviewed. No automatic merge. Upstream: https://github.com/KDE/kdeconnect-android/commit/$SHA"

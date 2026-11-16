@@ -72,6 +72,9 @@ SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- Shizuku is optional; it is not needed for KDE Connect or normal APK installation. -->
+    <queries><package android:name="moe.shizuku.privileged.api" /></queries>
+
     <application
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -452,6 +455,25 @@ SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted
                 android:name="android.support.PARENT_ACTIVITY"
                 android:value="org.kde.kdeconnect.ui.MainActivity" />
         </activity>
+
+        <service
+            android:name="org.kde.kdeconnect.BackgroundServiceTileService"
+            android:icon="@drawable/ic_notification"
+            android:exported="true"
+            android:label="@string/kde_connect"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <activity
+            android:name="org.kde.kdeconnect.updates.UpdaterActivity"
+            android:exported="false"
+            android:label="@string/settings_updates" />
+        <receiver
+            android:name="org.kde.kdeconnect.updates.InstallResultReceiver"
+            android:exported="false" />
 
         <service
             android:name="org.kde.kdeconnect.plugins.clipboard.ClipboardTileService"

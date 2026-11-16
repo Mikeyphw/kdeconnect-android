@@ -36,6 +36,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import org.kde.kdeconnect.BackgroundService
+import org.kde.kdeconnect.updates.UpdaterActivity
 import org.kde.kdeconnect.extensions.setupBottomPadding
 import org.kde.kdeconnect.helpers.CreateFileParams
 import org.kde.kdeconnect.helpers.CreateFileResultContract
@@ -63,6 +64,8 @@ class SettingsFragment : PreferenceFragmentCompat() {
             deviceNamePref(context),
             themePref(context),
             persistentNotificationPref(context),
+            quitPref(context),
+            updatePref(context),
             trustedNetworkPref(context),
             devicesByIpPref(context),
             bluetoothSupportPref(context),
@@ -165,6 +168,28 @@ class SettingsFragment : PreferenceFragmentCompat() {
                 true
             }
         }
+
+    private fun quitPref(context: Context) = Preference(context).apply {
+        isPersistent = false
+        setTitle(R.string.settings_quit)
+        setSummary(R.string.settings_quit_summary)
+        onPreferenceClickListener = Preference.OnPreferenceClickListener {
+            BackgroundService.Stop(context)
+            // Explicitly closing the Activity preserves the stopped state.
+            requireActivity().finishAffinity()
+            true
+        }
+    }
+
+    private fun updatePref(context: Context) = Preference(context).apply {
+        isPersistent = false
+        setTitle(R.string.settings_updates)
+        setSummary(R.string.settings_updates_summary)
+        onPreferenceClickListener = Preference.OnPreferenceClickListener {
+            startActivity(Intent(context, UpdaterActivity::class.java))
+            true
+        }
+    }
 
     val activityLauncherWithDevicesByIpRefresh = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         updateDevicesByIpSummary()

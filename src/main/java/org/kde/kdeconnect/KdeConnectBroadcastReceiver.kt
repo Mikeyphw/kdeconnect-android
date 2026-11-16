@@ -21,21 +21,21 @@ class KdeConnectBroadcastReceiver : BroadcastReceiver() {
         when (action) {
             Intent.ACTION_MY_PACKAGE_REPLACED -> {
                 Log.i("KdeConnect", "MyUpdateReceiver")
-                BackgroundService.Start(context)
+                BackgroundService.StartAutomatically(context)
             }
 
             Intent.ACTION_BOOT_COMPLETED -> {
                 Log.i("KdeConnect", "KdeConnectBroadcastReceiver")
-                BackgroundService.Start(context)
+                BackgroundService.StartAutomatically(context)
             }
 
             WifiManager.SUPPLICANT_CONNECTION_CHANGE_ACTION, WifiManager.WIFI_STATE_CHANGED_ACTION, ConnectivityManager.CONNECTIVITY_ACTION -> {
                 Log.i("KdeConnect", "Connection state changed, trying to connect")
-                BackgroundService.ForceRefreshConnections(context)
+                BackgroundService.RefreshAutomatically(context)
             }
 
             Intent.ACTION_SCREEN_ON -> {
-                BackgroundService.ForceRefreshConnections(context)
+                BackgroundService.RefreshAutomatically(context)
             }
 
             else -> Log.i("BroadcastReceiver", "Ignoring broadcast event: ${intent.action}")

@@ -1,0 +1,32 @@
+# Community fork CI. The upstream GitLab pipeline remains authoritative for KDE upstream.
+name: Android community build
+on:
+  push:
+    branches: [master, 'feature/**', 'sync/**']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - name: Build, unit tests and lint
+        run: ./gradlew --no-daemon --console=plain -Pci testDebugUnitTest lintDebug assembleDebug
+      - name: Upload debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kdeconnect-community-debug-${{ github.sha }}
+          path: build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14

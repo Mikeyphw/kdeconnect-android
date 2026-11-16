@@ -41,13 +41,16 @@ android {
         applicationId = "org.kde.kdeconnect_tp"
         minSdk = 23
         targetSdk = 37
-        versionCode = 13703
+        versionCode = System.getenv("KDE_FORK_VERSION_CODE")?.toIntOrNull() ?: 13703
         versionName = "1.37.3"
         proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
     }
     buildFeatures {
+        // AGP 9+ disables AIDL by default; IPrivilegedInstaller must be generated.
+        aidl = true
         viewBinding = true
         compose = true
+        aidl = true
         buildConfig = true
     }
 
@@ -73,6 +76,15 @@ android {
         }
     }
     signingConfigs {
+        create("communityRelease") {
+            val path = System.getenv("KDE_FORK_KEYSTORE")
+            if (!path.isNullOrBlank()) {
+                storeFile = file(path)
+                storePassword = System.getenv("KDE_FORK_STORE_PASSWORD")
+                keyAlias = System.getenv("KDE_FORK_KEY_ALIAS")
+                keyPassword = System.getenv("KDE_FORK_KEY_PASSWORD")
+            }
+        }
         getByName("debug") {
             storeFile = file("debug.keystore")
             storePassword = "android"
@@ -89,12 +101,18 @@ android {
             versionNameSuffix = "-debug"
         }
         getByName("release") {
+            // A distinct package prevents overwriting the official F-Droid/Play build.
+            applicationIdSuffix = ".mikey"
+            versionNameSuffix = "-community"
+            if (!System.getenv("KDE_FORK_KEYSTORE").isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("communityRelease")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
         }
     }
     lint {
-        abortOnError = false
+        abortOnError = true
         checkReleaseBuilds = false
     }
 }
@@ -274,6 +292,8 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.preference.ktx)
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
     implementation(libs.androidx.recyclerview)
     implementation(libs.androidx.swiperefreshlayout)
     implementation(libs.androidx.documentfile)

@@ -1,0 +1,149 @@
+# Manually approved signed release. Never publishes on a PR or unreviewed upstream sync.
+name: Signed community APK release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'New release tag, e.g. community-v1.37.3-1'
+        required: true
+        type: string
+      version_code:
+        description: 'Monotonically increasing Android versionCode (integer)'
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  build-and-publish:
+    if: github.ref == 'refs/heads/master' && github.repository == 'Mikeyphw/kdeconnect-android'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      KDE_FORK_VERSION_CODE: ${{ inputs.version_code }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - name: Validate tag, version code and signing configuration
+        env:
+          KEYSTORE_B64: ${{ secrets.KDE_FORK_KEYSTORE_BASE64 }}
+          KDE_FORK_STORE_PASSWORD: ${{ secrets.KDE_FORK_STORE_PASSWORD }}
+          KDE_FORK_KEY_ALIAS: ${{ secrets.KDE_FORK_KEY_ALIAS }}
+          KDE_FORK_KEY_PASSWORD: ${{ secrets.KDE_FORK_KEY_PASSWORD }}
+          KDE_FORK_SIGNING_CERT_SHA256: ${{ secrets.KDE_FORK_SIGNING_CERT_SHA256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^community-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]] || exit 2
+          [[ "$KDE_FORK_VERSION_CODE" =~ ^[1-9][0-9]{0,8}$ ]] || exit 2
+          [[ -n "$KEYSTORE_B64" && -n "$KDE_FORK_STORE_PASSWORD" && -n "$KDE_FORK_KEY_ALIAS" && -n "$KDE_FORK_KEY_PASSWORD" && -n "$KDE_FORK_SIGNING_CERT_SHA256" ]] || { echo 'Signing secrets or pinned certificate fingerprint unavailable'; exit 2; }
+          [[ "$KDE_FORK_SIGNING_CERT_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]] || { echo 'Invalid pinned certificate fingerprint'; exit 2; }
+          # Baseline upstream source versionCode; never publish a lower initial community code.
+          (( 10#$KDE_FORK_VERSION_CODE > 13703 )) || { echo 'VersionCode must exceed upstream source baseline 13703'; exit 2; }
+          path="$RUNNER_TEMP/kde-fork-release.jks"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$path"
+          chmod 0600 "$path"
+          echo "KDE_FORK_KEYSTORE=$path" >> "$GITHUB_ENV"
+      - name: Refuse rollback against every previously published community release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Inspect the complete paginated GitHub release history, not only the most recent N.
+          page=1
+          while :; do
+            batch=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100&page=$page")
+            count=$(jq 'length' <<< "$batch")
+            (( count > 0 )) || break
+            while IFS= read -r prior_tag; do
+              [[ -n "$prior_tag" ]] || continue
+              path="$RUNNER_TEMP/prior-release-$page"
+              mkdir -p "$path"
+              gh release download "$prior_tag" --pattern update.json --dir "$path"
+              PREVIOUS_MANIFEST="$path/update.json" python3 - <<'PYMANIFEST'
+          import os, json
+          with open(os.environ['PREVIOUS_MANIFEST'], encoding='utf-8') as f:
+              manifest = json.load(f)
+          old = int(manifest['version_code'])
+          new = int(os.environ['KDE_FORK_VERSION_CODE'])
+          if new <= old:
+              raise SystemExit(f'Release versionCode rollback refused: {new} <= {old}')
+          print('Verified predecessor:', manifest['tag'], old, '->', new)
+          PYMANIFEST
+              rm -f "$path/update.json"
+            done < <(jq -r '.[] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^community-v[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+$"))' <<< "$batch")
+            ((page += 1))
+          done
+      - name: Unit tests and Android build
+        env:
+          KDE_FORK_STORE_PASSWORD: ${{ secrets.KDE_FORK_STORE_PASSWORD }}
+          KDE_FORK_KEY_ALIAS: ${{ secrets.KDE_FORK_KEY_ALIAS }}
+          KDE_FORK_KEY_PASSWORD: ${{ secrets.KDE_FORK_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon --console=plain -Pci testDebugUnitTest lintDebug lintRelease assembleRelease
+      - name: Verify signer and create release metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KDE_FORK_SIGNING_CERT_SHA256: ${{ secrets.KDE_FORK_SIGNING_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          apk=$(find build/outputs/apk/release -maxdepth 1 -name '*.apk' -type f | head -1)
+          test -n "$apk"
+          cp "$apk" release/kdeconnect-community.apk
+          apksigner=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)
+          test -n "$apksigner"
+          "$apksigner" verify --verbose --print-certs release/kdeconnect-community.apk > "$RUNNER_TEMP/apksigner-result.txt"
+          APKSIGNER_RESULT="$RUNNER_TEMP/apksigner-result.txt" python3 - <<'PYSIGNER'
+          import os, re
+          with open(os.environ['APKSIGNER_RESULT'], encoding='utf-8') as f:
+              report = f.read()
+          digests = re.findall(r'Signer #\d+ certificate SHA-256 digest:\s*([0-9a-fA-F]{64})', report)
+          pinned = os.environ['KDE_FORK_SIGNING_CERT_SHA256'].lower()
+          if len(digests) != 1 or digests[0].lower() != pinned:
+              raise SystemExit('APK signing identity differs from configured pinned release certificate')
+          print('Pinned APK signing certificate verified:', pinned)
+          PYSIGNER
+          aapt=$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -1)
+          test -n "$aapt"
+          badging=$("$aapt" dump badging release/kdeconnect-community.apk)
+          grep -F "package: name='org.kde.kdeconnect_tp.mikey' versionCode='$KDE_FORK_VERSION_CODE'" <<< "$badging"
+          apk_version_name=$(sed -n "s/^package: .* versionName='\([^']*\)'.*/\1/p" <<< "$badging" | head -1)
+          [[ -n "$apk_version_name" ]] || { echo 'Cannot extract APK versionName' >&2; exit 3; }
+          APK_VERSION_NAME="$apk_version_name" python3 - <<'PY'
+          import os,json,hashlib,pathlib
+          apk=pathlib.Path('release/kdeconnect-community.apk')
+          meta={
+            'schema': 1,
+            'tag': os.environ['RELEASE_TAG'],
+            'apk_name': apk.name,
+            'apk_size': apk.stat().st_size,
+            'apk_sha256': hashlib.sha256(apk.read_bytes()).hexdigest(),
+            'package_name': 'org.kde.kdeconnect_tp.mikey',
+            'version_code': int(os.environ['KDE_FORK_VERSION_CODE']),
+            'version_name': os.environ['APK_VERSION_NAME'],
+            'source_commit': os.environ['GITHUB_SHA'],
+          }
+          pathlib.Path('release/update.json').write_text(json.dumps(meta,indent=2,sort_keys=True)+'\n')
+          PY
+          # Existing-release or reused tag: refuse, never mutate a published artifact.
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'Release already exists; refusing overwrite' >&2; exit 3
+          fi
+          if git ls-remote --tags origin "refs/tags/$RELEASE_TAG" | grep -q .; then
+            echo 'Tag already exists; refusing overwrite' >&2; exit 3
+          fi
+      - name: Publish signed APK and update manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" release/kdeconnect-community.apk release/update.json \
+            --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes "Signed KDE Connect community build. Source commit: $GITHUB_SHA."
