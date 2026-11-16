@@ -2,7 +2,7 @@
 name: Android community build
 on:
   push:
-    branches: [master, 'feature/**', 'sync/**']
+    branches: [master]
   pull_request:
   workflow_dispatch:
 permissions:

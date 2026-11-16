@@ -54,6 +54,41 @@ class CommunityWorkflowContractTests(unittest.TestCase):
 
 
     @staticmethod
+    def check_single_event_trigger_contract(workflow):
+        """Each feature/sync PR HEAD gets one run; master and manual builds remain."""
+        expected = (
+            "on:\n"
+            "  push:\n"
+            "    branches: [master]\n"
+            "  pull_request:\n"
+            "  workflow_dispatch:\n"
+        )
+        if workflow.count(expected) != 1:
+            raise ValueError("A PR branch must not run for both push and pull_request")
+        # Do not weaken PR coverage by filtering paths, target branches or actions.
+        if re.search(r"(?m)^  pull_request:\n    (?:types|branches|paths|paths-ignore):", workflow):
+            raise ValueError("Pull-request CI may not be filtered")
+        if "continue-on-error:" in workflow:
+            raise ValueError("CI failures must remain blocking")
+
+    def test_no_duplicate_runs_per_feature_pr(self):
+        workflow = self.workflows()[0].read_text(encoding="utf-8")
+        self.check_single_event_trigger_contract(workflow)
+        cases = (
+            workflow.replace("branches: [master]", "branches: [master, 'feature/**']", 1),
+            workflow.replace("branches: [master]", "branches: [master, 'sync/**']", 1),
+            workflow.replace("  pull_request:\n", "", 1),
+            workflow.replace("  workflow_dispatch:\n", "", 1),
+            workflow.replace("  pull_request:\n", "  pull_request:\n    paths: ['src/**']\n", 1),
+            workflow.replace("  push:\n    branches: [master]", "  push:\n    branches: ['feature/**']", 1),
+            workflow + "\n  continue-on-error: true\n",
+        )
+        for case in cases:
+            with self.subTest(case=case[:130]):
+                with self.assertRaises(ValueError):
+                    self.check_single_event_trigger_contract(case)
+
+    @staticmethod
     def check_required_ci_contract(policy, workflow):
         """Fail closed when the committed CI authority drifts from the PR workflow."""
         expected = {
@@ -72,8 +107,7 @@ class CommunityWorkflowContractTests(unittest.TestCase):
             raise ValueError("Required workflow name missing or changed")
         if not re.search(r"(?m)^  pull_request:[ \t]*(?:\n  [a-z_]+:|\npermissions:)", workflow):
             raise ValueError("Pull-request trigger missing or filtered")
-        if not re.search(r"(?m)^  push:\s*$", workflow):
-            raise ValueError("Expected push trigger was removed")
+        CommunityWorkflowContractTests.check_single_event_trigger_contract(workflow)
         if not re.search(r"(?m)^  workflow_dispatch:\s*$", workflow):
             raise ValueError("Manual build trigger was removed")
         if not re.search(r"(?m)^      - name: Validate community workflow contracts\s*$", workflow):

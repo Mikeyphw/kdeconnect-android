@@ -37,7 +37,7 @@ Quit KDE Connect turns off background networking and remains stopped across syst
 
 ## CI and limitations
 
-- `android-ci.yml` tests/builds every PR and named feature branch.
+- `android-ci.yml` runs once per pull request, on pushes to `master`, and on explicit `workflow_dispatch`. Pushes to `feature/**` and `sync/**` do not automatically start a second build. Before opening a PR, use manual dispatch if a branch build is needed.
 - `upstream-sync.yml` opens a **review PR** from an immutable per-upstream-commit branch; no auto-merge or force-push. Conflicts fail closed.
 - `community-release.yml` requires private signing secrets and explicit manual dispatch. Android tests/lint/build and installed-device validation are distinct gates.
 - Current limitation: no hosted Gradle build or Android 16 device test was executed in the artifact preparation environment. Shizuku PackageInstaller UserService must be tested with real Shizuku and Sui (including failure/cancellation/confirmation), and release signatures and versionCode monotonicity must be validated end to end before production release.
