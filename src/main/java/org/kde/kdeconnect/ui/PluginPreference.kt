@@ -8,6 +8,8 @@ package org.kde.kdeconnect.ui
 import android.content.Context
 import android.util.TypedValue
 import android.view.View
+import androidx.annotation.MainThread
+import androidx.annotation.WorkerThread
 import androidx.preference.PreferenceViewHolder
 import androidx.preference.SwitchPreference
 import kotlinx.coroutines.CoroutineScope
@@ -46,6 +48,27 @@ class PluginPreference : SwitchPreference {
         this.listener = if (info.hasSettings) createClickListener() else null
     }
 
+    /** Read/modify/write the preference on the same worker dispatcher. */
+    private suspend fun togglePluginOnIo(): Boolean = withContext(Dispatchers.IO) {
+        togglePluginOnWorker()
+    }
+
+    @WorkerThread
+    private fun togglePluginOnWorker(): Boolean {
+        val newState = !device.isPluginEnabled(pluginKey)
+        device.setPluginEnabled(pluginKey, newState)
+        return newState
+    }
+
+    /** Android view properties must only be inspected and updated on Main. */
+    @MainThread
+    private fun updateBoundToggle(holder: PreferenceViewHolder, itemView: View, newState: Boolean) {
+        if (itemView.isAttachedToWindow) {
+            isChecked = newState
+            onStateChanged(holder, newState)
+        }
+    }
+
     override fun onBindViewHolder(holder: PreferenceViewHolder) {
         super.onBindViewHolder(holder)
 
@@ -55,16 +78,15 @@ class PluginPreference : SwitchPreference {
             itemView.isEnabled = false
             CoroutineScope(Dispatchers.Main.immediate).launch {
                 try {
-                    val newState = withContext(Dispatchers.IO) {
-                        !device.isPluginEnabled(pluginKey)
-                    }
-                    device.setPluginEnabled(pluginKey, newState)
-                    if (itemView.isAttachedToWindow) {
-                        isChecked = newState
-                        onStateChanged(holder, newState)
+                    // Keep the disk-backed setting transaction separate from UI work.
+                    val newState = togglePluginOnIo()
+                    withContext(Dispatchers.Main.immediate) {
+                        updateBoundToggle(holder, itemView, newState)
                     }
                 } finally {
-                    itemView.isEnabled = true
+                    withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main.immediate) {
+                        itemView.isEnabled = true
+                    }
                 }
             }
         }

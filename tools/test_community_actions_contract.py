@@ -342,3 +342,50 @@ class ReviewedLocalizationBaselineAndApiSafetyTests(unittest.TestCase):
             copy[index]=copy[index].replace(old,new,1)
             with self.subTest(file=index), self.assertRaises(ValueError):
                 self.check_api_and_lint_safety(*copy)
+
+
+class PluginPreferenceThreadBoundaryTests(unittest.TestCase):
+    """No UI access or preference writes on the wrong dispatcher."""
+
+    @staticmethod
+    def check_source(source: str):
+        worker = source.partition('    @WorkerThread\n    private fun togglePluginOnWorker()')[2].partition('\n    }')[0]
+        ui = source.partition('    @MainThread\n    private fun updateBoundToggle(')[2].partition('\n    }')[0]
+        if not worker or not ui:
+            raise ValueError('Explicit Main/Worker annotated functions required')
+        if ('!device.isPluginEnabled(pluginKey)' not in worker or
+                'device.setPluginEnabled(pluginKey, newState)' not in worker):
+            raise ValueError('Both preference read and write must remain on Worker')
+        if any(word in worker for word in ('itemView', 'onStateChanged(', 'isChecked =', '.isEnabled =')):
+            raise ValueError('Worker implementation must not touch Android views')
+        if 'withContext(Dispatchers.IO) {\n        togglePluginOnWorker()' not in source:
+            raise ValueError('Preference transaction must dispatch onto IO')
+        if ('withContext(Dispatchers.Main.immediate) {\n                        updateBoundToggle(' not in source or
+                'withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main.immediate)' not in source):
+            raise ValueError('UI updates and cancellation cleanup must dispatch onto Main')
+        if not all(part in ui for part in ('itemView.isAttachedToWindow',
+                                         'isChecked = newState', 'onStateChanged(holder, newState)')):
+            raise ValueError('Bound UI state must be updated on Main only')
+        if ('itemView.isEnabled = false' not in source or
+                'itemView.isEnabled = true' not in source):
+            raise ValueError('Item must be re-enabled after preference transaction')
+
+    def test_plugin_preference_thread_boundary(self):
+        file = ROOT/'src/main/java/org/kde/kdeconnect/ui/PluginPreference.kt'
+        self.check_source(file.read_text(encoding='utf-8'))
+
+    def test_negative_wrong_dispatcher_and_ui_calls(self):
+        source = (ROOT/'src/main/java/org/kde/kdeconnect/ui/PluginPreference.kt').read_text(encoding='utf-8')
+        mutations = (
+            source.replace('withContext(Dispatchers.IO) {\n        togglePluginOnWorker()',
+                           'withContext(Dispatchers.Main) {\n        togglePluginOnWorker()',1),
+            source.replace('withContext(Dispatchers.Main.immediate) {\n                        updateBoundToggle(',
+                           'withContext(Dispatchers.IO) {\n                        updateBoundToggle(',1),
+            source.replace('withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main.immediate)',
+                           'withContext(Dispatchers.IO)',1),
+            source.replace('device.setPluginEnabled(pluginKey, newState)',
+                           'itemView.isEnabled = true',1),
+        )
+        for altered in mutations:
+            with self.subTest(altered=altered[-60:]), self.assertRaises(ValueError):
+                self.check_source(altered)
