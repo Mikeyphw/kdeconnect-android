@@ -19,7 +19,12 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - uses: android-actions/setup-android@v3
+      - name: Validate community workflow contracts
+        run: python3 -m unittest discover -s tools -p 'test_community_actions_contract.py' -v
+      # v4.0.4 (exact commit); v3 requests Google's removed SDK `tools` package.
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd
+        with:
+          packages: 'platform-tools'
       - name: Build, unit tests and lint
         run: ./gradlew --no-daemon --console=plain -Pci testDebugUnitTest lintDebug assembleDebug
       - name: Upload debug APK
