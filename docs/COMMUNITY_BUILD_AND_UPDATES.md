@@ -40,14 +40,34 @@ Quit KDE Connect turns off background networking and remains stopped across syst
 - `android-ci.yml` runs once per pull request, on pushes to `master`, and on explicit `workflow_dispatch`. Pushes to `feature/**` and `sync/**` do not automatically start a second build. Before opening a PR, use manual dispatch if a branch build is needed.
 - `upstream-sync.yml` opens a **review PR** from an immutable per-upstream-commit branch; no auto-merge or force-push. Conflicts fail closed.
 - `community-release.yml` requires private signing secrets and explicit manual dispatch. Android tests/lint/build and installed-device validation are distinct gates.
-- Current limitation: no hosted Gradle build or Android 16 device test was executed in the artifact preparation environment. Shizuku PackageInstaller UserService must be tested with real Shizuku and Sui (including failure/cancellation/confirmation), and release signatures and versionCode monotonicity must be validated end to end before production release.
+- The hosted debug build, unit tests and lint passed for PR #1 at commit `68ed2b0498f538d92c5690adf79015ea79a04d6f` (run 43964580671). The subsequent unsigned release-variant qualification is **not accepted** until its own hosted run passes.
+- Current limitations: no Android 16 device acceptance or signed production-release validation has been performed. Shizuku PackageInstaller UserService must be tested with real Shizuku and Sui (including failure/cancellation/confirmation), and release signatures and versionCode monotonicity must be validated end to end before production release.
 
+
+## Unsigned pre-release CI qualification
+
+Before a signed release is requested, the **single** PR workflow now runs
+`testDebugUnitTest`, `lintDebug`, `assembleDebug`, `testReleaseUnitTest`,
+`lintRelease`, and `assembleRelease` against the same exact PR revision.
+It then inspects the unsigned release APK with `aapt`, requiring the distinct
+`org.kde.kdeconnect_tp.mikey` package identity; it refuses an unexpectedly
+signed release APK. No release keystore or signing secrets are available to PR
+jobs; the unsigned release APK is **never uploaded or published**. Only the
+debug APK is uploaded after all checks pass. Debug and release lint and test
+reports are retained on failures. Both lint tasks retain `abortOnError`.
+
+This qualifies the release build **variant**, not the actual signing identity,
+real-device functionality, PackageInstaller/Shizuku/root behavior, permission
+prompts or the manual signed release pipeline. The separate release workflow
+still requires explicit authorization, the stable private signing key, APK
+certificate and metadata verification, and rollback protection. Do not
+interpret a green PR run as permission to publish an untested signed APK.
 
 ## Hosted CI lint artifact retention
 
-The GitHub PR CI job runs mandatory `testDebugUnitTest lintDebug assembleDebug`.
+The GitHub PR CI job runs mandatory debug and release variant tests, lint and assembly.
 A failure is **not** treated as success. A separate `if: always()` upload step
-retains complete Lint XML/HTML/SARIF, Lint text and test XML reports (when
+retains debug/release Lint XML/HTML/SARIF, Lint text and test XML reports (when
 produced), so existing upstream debt and community-fork regressions can be
 classified before choosing fixes. No lint severity, security diagnostic,
 `abortOnError` or gate is disabled. A non-green run remains unqualified and

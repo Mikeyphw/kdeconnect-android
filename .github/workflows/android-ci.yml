@@ -25,8 +25,26 @@ jobs:
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd
         with:
           packages: 'platform-tools'
-      - name: Build, unit tests and lint
-        run: ./gradlew --no-daemon --console=plain -Pci testDebugUnitTest lintDebug assembleDebug
+      # Unsigned release variant is qualified in PR CI, not published.
+      # Manual signed publishing uses separate workflow with explicit secrets/approval.
+      - name: Build, test and lint debug and release variants
+        run: ./gradlew --no-daemon --console=plain -Pci testDebugUnitTest lintDebug assembleDebug testReleaseUnitTest lintRelease assembleRelease
+      - name: Verify unsigned community release package identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t apks < <(find build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print)
+          [[ ${#apks[@]} -eq 1 ]] || { echo 'Expected exactly one unsigned release APK' >&2; exit 1; }
+          aapt=$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -1)
+          [[ -x "$aapt" ]] || { echo 'Android aapt unavailable' >&2; exit 1; }
+          badging=$("$aapt" dump badging "${apks[0]}")
+          grep -Fq "package: name='org.kde.kdeconnect_tp.mikey'" <<< "$badging"
+          apksigner=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)
+          [[ -x "$apksigner" ]] || { echo 'Android apksigner unavailable' >&2; exit 1; }
+          if "$apksigner" verify "${apks[0]}" >/dev/null 2>&1; then
+            echo 'Unexpectedly signed release APK in PR CI; refusing' >&2
+            exit 1
+          fi
       # Preserve the entire Lint/Test diagnostics when the mandatory build fails.
       # This step does NOT neutralize lint errors or change the job verdict.
       - name: Upload full lint and test diagnostics
@@ -38,9 +56,15 @@ jobs:
             build/reports/lint-results-debug.xml
             build/reports/lint-results-debug.html
             build/reports/lint-results-debug.sarif
+            build/reports/lint-results-release.xml
+            build/reports/lint-results-release.html
+            build/reports/lint-results-release.sarif
             build/intermediates/lint_intermediate_text_report/**/lint-results-debug.txt
+            build/intermediates/lint_intermediate_text_report/**/lint-results-release.txt
             build/test-results/testDebugUnitTest/**/*.xml
             build/reports/tests/testDebugUnitTest/**
+            build/test-results/testReleaseUnitTest/**/*.xml
+            build/reports/tests/testReleaseUnitTest/**
           if-no-files-found: warn
           retention-days: 14
       - name: Upload debug APK

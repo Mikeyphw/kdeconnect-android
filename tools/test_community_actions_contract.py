@@ -33,7 +33,8 @@ class CommunityWorkflowContractTests(unittest.TestCase):
 
     def test_ci_still_builds_and_tests_on_pull_request(self):
         source = self.workflows()[0].read_text(encoding="utf-8")
-        for marker in ("  pull_request:", "  push:", "testDebugUnitTest", "lintDebug", "assembleDebug"):
+        for marker in ("  pull_request:", "  push:", "testDebugUnitTest", "lintDebug", "assembleDebug",
+                       "testReleaseUnitTest", "lintRelease", "assembleRelease"):
             with self.subTest(marker=marker):
                 self.assertIn(marker, source)
         self.assertIn("if: success()", source)
@@ -229,12 +230,16 @@ class FullLintDiagnosticsContractTests(unittest.TestCase):
         needed=('if: always()', 'actions/upload-artifact@v4',
                 'build/reports/lint-results-debug.xml',
                 'build/reports/lint-results-debug.sarif',
+                'build/reports/lint-results-release.xml',
+                'build/reports/lint-results-release.sarif',
                 'build/intermediates/lint_intermediate_text_report/**/lint-results-debug.txt',
+                'build/intermediates/lint_intermediate_text_report/**/lint-results-release.txt',
                 'build/test-results/testDebugUnitTest/**/*.xml',
+                'build/test-results/testReleaseUnitTest/**/*.xml',
                 'if-no-files-found: warn')
         for token in needed:
             if token not in suffix:raise ValueError('Missing mandatory evidence token '+token)
-        if ('-Pci testDebugUnitTest lintDebug assembleDebug' not in workflow or
+        if ('-Pci testDebugUnitTest lintDebug assembleDebug testReleaseUnitTest lintRelease assembleRelease' not in workflow or
                 'continue-on-error:' in workflow or
                 'lintDebug --continue' in workflow):
             raise ValueError('CI must still fail when lint or tests fail')
@@ -389,3 +394,63 @@ class PluginPreferenceThreadBoundaryTests(unittest.TestCase):
         for altered in mutations:
             with self.subTest(altered=altered[-60:]), self.assertRaises(ValueError):
                 self.check_source(altered)
+
+
+class UnsignedReleaseVariantQualificationTests(unittest.TestCase):
+    """PR CI qualifies both variants without signing, publishing or distributing release APKs."""
+
+    @staticmethod
+    def check_workflow(source):
+        required = (
+            'run: ./gradlew --no-daemon --console=plain -Pci testDebugUnitTest lintDebug assembleDebug testReleaseUnitTest lintRelease assembleRelease',
+            '- name: Verify unsigned community release package identity',
+            'set -euo pipefail',
+            'find build/outputs/apk/release -maxdepth 1 -type f -name',
+            '[[ ${#apks[@]} -eq 1 ]]',
+            'badging=$("$aapt" dump badging "${apks[0]}")',
+            "package: name='org.kde.kdeconnect_tp.mikey'",
+            '"$apksigner" verify "${apks[0]}" >/dev/null 2>&1',
+            "Unexpectedly signed release APK in PR CI; refusing",
+            'build/reports/lint-results-release.sarif',
+            'build/test-results/testReleaseUnitTest/**/*.xml',
+        )
+        for term in required:
+            if term not in source:
+                raise ValueError('Missing release-variant CI qualification: '+term)
+        if source.count('- name: Verify unsigned community release package identity') != 1:
+            raise ValueError('Release artifact identity verification must run exactly once')
+        if ('if "$apksigner" verify "${apks[0]}" >/dev/null 2>&1; then' not in source or
+                'exit 1' not in source.split('if "$apksigner" verify',1)[1].split('fi',1)[0]):
+            raise ValueError('Signed release artifacts must be refused in PR CI')
+        if any(term in source for term in ('gh release create','KDE_FORK_STORE_PASSWORD',
+                                          'KDE_FORK_KEYSTORE_BASE64','KDE_FORK_KEYSTORE=',
+                                          'continue-on-error:','|| true')):
+            raise ValueError('PR CI must never publish, use signing secrets, or bypass errors')
+        upload_section = source.split('- name: Upload debug APK',1)[1]
+        if 'build/outputs/apk/debug/*.apk' not in upload_section or 'if: success()' not in upload_section:
+            raise ValueError('PR debug artifact must remain successful-build-only')
+        if 'build/outputs/apk/release/*.apk' in source or 'release/kdeconnect-community.apk' in source:
+            raise ValueError('Unsigned release APKs must not be uploaded for distribution')
+        if 'timeout-minutes: 55' not in source:
+            raise ValueError('CI job must retain explicit watchdog timeout')
+
+    def test_release_variant_qualification_contract(self):
+        source=(ROOT/'.github/workflows/android-ci.yml').read_text(encoding='utf-8')
+        self.check_workflow(source)
+
+    def test_release_variant_qualification_negative_drift(self):
+        source=(ROOT/'.github/workflows/android-ci.yml').read_text(encoding='utf-8')
+        cases=(
+            source.replace('testReleaseUnitTest','testDebugUnitTest',1),
+            source.replace('lintRelease','lintDebug',1),
+            source.replace('assembleRelease','assembleDebug',1),
+            source.replace("package: name='org.kde.kdeconnect_tp.mikey'","package: name='org.kde.kdeconnect_tp'",1),
+            source.replace('if "$apksigner" verify', 'if false && "$apksigner" verify',1),
+            source.replace('exit 1\n          fi','exit 0\n          fi',1),
+            source+'\n      - run: gh release create v1\n',
+            source+'\n      continue-on-error: true\n',
+            source.replace('build/outputs/apk/debug/*.apk','build/outputs/apk/release/*.apk',1),
+        )
+        for case in cases:
+            with self.subTest(case=case[-90:]),self.assertRaises(ValueError):
+                self.check_workflow(case)
