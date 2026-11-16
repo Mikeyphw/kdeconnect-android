@@ -49,6 +49,13 @@ Quit KDE Connect turns off background networking and remains stopped across syst
 Before a signed release is requested, the **single** PR workflow now runs
 `testDebugUnitTest`, `lintDebug`, `assembleDebug`, `testReleaseUnitTest`,
 `lintRelease`, and `assembleRelease` against the same exact PR revision.
+Android Gradle Plugin 9.5.1 enables unit-test components only for the tested
+(default debug) build type unless `android.onlyEnableUnitTestForTheTestedBuildType=false`
+is set. `gradle.properties` opts into both **real** test variants. PR run
+`43969732157` failed before test execution because `testReleaseUnitTest` was
+absent. Do not replace release tests with an empty Gradle task or remove them
+from required CI. The corrected PR needs a fresh hosted run before release
+variant acceptance can be claimed.
 It then inspects the unsigned release APK with `aapt`, requiring the distinct
 `org.kde.kdeconnect_tp.mikey` package identity; it refuses an unexpectedly
 signed release APK. No release keystore or signing secrets are available to PR

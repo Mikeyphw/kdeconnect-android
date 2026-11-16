@@ -454,3 +454,47 @@ class UnsignedReleaseVariantQualificationTests(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case[-90:]),self.assertRaises(ValueError):
                 self.check_workflow(case)
+
+
+class Agp9DualVariantUnitTestRegistrationTests(unittest.TestCase):
+    """AGP 9 defaults to debug-only units; both real variants are required in CI."""
+
+    @staticmethod
+    def check_registration(props: str, workflow: str, gradle: str):
+        import re
+        lines = re.findall(r'(?m)^\s*android\.onlyEnableUnitTestForTheTestedBuildType\s*=\s*(\S+)\s*$', props)
+        if lines != ['false']:
+            raise ValueError('AGP9 must register actual debug and release unit-test components')
+        expected = 'testDebugUnitTest lintDebug assembleDebug testReleaseUnitTest lintRelease assembleRelease'
+        if workflow.count(expected) != 1:
+            raise ValueError('Both variants, lint checks and APK builds must run in mandatory CI')
+        if any(t in workflow for t in ('continue-on-error:', '|| true', '--dry-run', 'testReleaseUnitTest SKIPPED')):
+            raise ValueError('CI must not skip, simulate, or ignore failures from release unit tests')
+        if not re.search(r'(?m)^androidGradlePlugin\s*=\s*"9\.[0-9]+\.[0-9]+"\s*$', gradle):
+            raise ValueError('AGP9 dual-variant setting must remain aligned with the version catalog')
+
+    def inputs(self):
+        return ((ROOT/'gradle.properties').read_text(encoding='utf-8'),
+                (ROOT/'.github/workflows/android-ci.yml').read_text(encoding='utf-8'),
+                (ROOT/'gradle/libs.versions.toml').read_text(encoding='utf-8'))
+
+    def test_real_debug_and_release_unit_tests_registered(self):
+        self.check_registration(*self.inputs())
+
+    def test_negative_agp9_registration_and_ci_drift(self):
+        props, workflow, gradle = self.inputs()
+        cases = (
+            ('props', props.replace('android.onlyEnableUnitTestForTheTestedBuildType=false',
+                                    'android.onlyEnableUnitTestForTheTestedBuildType=true'), workflow, gradle),
+            ('props', props.replace('android.onlyEnableUnitTestForTheTestedBuildType=false', ''), workflow, gradle),
+            ('props', props + '\nandroid.onlyEnableUnitTestForTheTestedBuildType=true\n', workflow, gradle),
+            ('ci', props, workflow.replace('testReleaseUnitTest ', ''), gradle),
+            ('ci', props, workflow.replace('lintRelease ', ''), gradle),
+            ('ci', props, workflow.replace('assembleRelease', 'assembleDebug', 1), gradle),
+            ('ci', props, workflow+'\ncontinue-on-error: true\n', gradle),
+            ('ci', props, workflow.replace('testReleaseUnitTest', 'testDebugUnitTest', 1), gradle),
+            ('catalog', props, workflow, gradle.replace('androidGradlePlugin = "9.5.1"', 'androidGradlePlugin = "8.0.0"', 1)),
+        )
+        for kind, p, w, g in cases:
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                self.check_registration(p, w, g)
