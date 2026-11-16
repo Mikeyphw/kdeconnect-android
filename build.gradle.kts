@@ -114,6 +114,8 @@ android {
         }
     }
     lint {
+        // Source-bound localization backlog only; all new lint findings remain errors.
+        baseline = file("lint-baseline.xml")
         abortOnError = true
         checkReleaseBuilds = false
     }

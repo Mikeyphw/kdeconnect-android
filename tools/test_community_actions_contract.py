@@ -249,3 +249,96 @@ class FullLintDiagnosticsContractTests(unittest.TestCase):
                         workflow+'\n      continue-on-error: true\n'):
             with self.subTest(mutated=mutated[-80:]):
                 with self.assertRaises(ValueError):self.check_contract(mutated)
+
+
+class ReviewedLocalizationBaselineAndApiSafetyTests(unittest.TestCase):
+    """Translation backlog is a fixed inventory, never a blanket lint bypass."""
+
+    @staticmethod
+    def check_reviewed_baseline(xml_bytes):
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(xml_bytes)
+        if root.tag != 'issues' or root.get('type') != 'baseline' or root.get('format') != '6':
+            raise ValueError('Unexpected Android lint baseline format')
+        issues = root.findall('issue')
+        if len(issues) != 444:
+            raise ValueError('Localization backlog inventory changed; review new/deleted findings')
+        counts = {id: sum(i.get('id') == id for i in issues)
+                  for id in ('MissingTranslation','ExtraTranslation')}
+        if counts != {'MissingTranslation':424,'ExtraTranslation':20}:
+            raise ValueError('Only the reviewed translation backlog may be baselined')
+        for issue in issues:
+            if issue.get('id') not in counts or not issue.get('message'):
+                raise ValueError('Security/compatibility lint may not be baselined')
+            locs=issue.findall('location')
+            if not locs or any(not l.get('file','').startswith(('src/main/res/','src/debug/res/'))
+                               or l.get('file','').startswith('/') for l in locs):
+                raise ValueError('Baseline may only cover source resource localization')
+
+    @staticmethod
+    def check_api_and_lint_safety(gradle,manifest,privileged,saf,ui,default_bools,api30_bools):
+        if 'baseline = file("lint-baseline.xml")' not in gradle:
+            raise ValueError('Required source-bound translation baseline missing')
+        for token in ('abortOnError = true','coreLibraryDesugaring(libs.android.desugarJdkLibsNio)',
+                      'isCoreLibraryDesugaringEnabled = true'):
+            if token not in gradle:
+                raise ValueError('Android compatibility or blocking lint contract removed')
+        if 'android.intent.category.LEANBACK_LAUNCHER' not in manifest:
+            raise ValueError('Android TV launcher category missing')
+        for token in ('tools:targetApi="30"','android:enabled="@bool/kde_controls_provider_enabled"',
+                      'RunCommandControlsProviderService'):
+            if token not in manifest: raise ValueError('API 30 Controls provider guard absent')
+        if 'kde_controls_provider_enabled">false' not in default_bools or \
+           'kde_controls_provider_enabled">true' not in api30_bools or \
+           'config_materialPreferenceIconSpaceReserved">true' not in default_bools:
+            raise ValueError('Required safe default and API30-only resource values absent')
+        if ('Build.VERSION.SDK_INT >= Build.VERSION_CODES.O' not in privileged or
+             'if (proc.isAlive) proc.destroyForcibly()' not in privileged or
+             'proc.destroy()' not in privileged):
+            raise ValueError('API24-safe Process cleanup missing')
+        if ('@SuppressLint("NewApi")' not in saf or
+            'coreLibraryDesugaring(desugar_jdk_libs_nio)' not in saf):
+            raise ValueError('NIO desugared API contract changed')
+        if ('withContext(Dispatchers.IO)' not in ui or
+            '!device.isPluginEnabled(pluginKey)' not in ui):
+            raise ValueError('Preference read must leave the UI thread')
+
+    def test_reviewed_translation_baseline_only(self):
+        self.check_reviewed_baseline((ROOT/'lint-baseline.xml').read_bytes())
+
+    def test_baseline_rejects_nontranslation_and_growth(self):
+        import xml.etree.ElementTree as ET
+        baseline=(ROOT/'lint-baseline.xml').read_bytes()
+        root=ET.fromstring(baseline)
+        ET.SubElement(root,'issue',{'id':'NewApi','message':'Must not baseline safety'})
+        with self.assertRaises(ValueError):
+            self.check_reviewed_baseline(ET.tostring(root))
+        root=ET.fromstring(baseline)
+        root.remove(root.findall('issue')[0])
+        with self.assertRaises(ValueError):
+            self.check_reviewed_baseline(ET.tostring(root))
+
+    def files(self):
+        def read(path): return (ROOT/path).read_text(encoding='utf-8')
+        return (read('build.gradle.kts'),read('src/main/AndroidManifest.xml'),
+                read('src/main/java/org/kde/kdeconnect/updates/PrivilegedUpdateInstall.kt'),
+                read('src/main/java/org/kde/kdeconnect/plugins/sftp/saf/SafFileSystemProvider.kt'),
+                read('src/main/java/org/kde/kdeconnect/ui/PluginPreference.kt'),
+                read('src/main/res/values/bools.xml'),read('src/main/res/values-v30/bools.xml'))
+
+    def test_api_compatibility_and_blocking_lint_contract(self):
+        self.check_api_and_lint_safety(*self.files())
+
+    def test_api_safety_negative_mutations(self):
+        originals=self.files()
+        cases={0:('abortOnError = true','abortOnError = false'),
+               1:('android:enabled="@bool/kde_controls_provider_enabled"','android:enabled="true"'),
+               2:('Build.VERSION.SDK_INT >= Build.VERSION_CODES.O','Build.VERSION.SDK_INT >= 35'),
+               3:('coreLibraryDesugaring(desugar_jdk_libs_nio)','NIO not desugared'),
+               4:('withContext(Dispatchers.IO)','withContext(Dispatchers.Main)')}
+        for index,(old,new) in cases.items():
+            copy=list(originals)
+            self.assertIn(old,copy[index])
+            copy[index]=copy[index].replace(old,new,1)
+            with self.subTest(file=index), self.assertRaises(ValueError):
+                self.check_api_and_lint_safety(*copy)

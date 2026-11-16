@@ -131,7 +131,12 @@ object PrivilegedUpdateInstall {
                 "Root installer failed (status $code): ${result.take(400)}"
             }
         } finally {
-            if (proc.isAlive) proc.destroyForcibly()
+            // API 24-25 lack Process.isAlive()/destroyForcibly().
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (proc.isAlive) proc.destroyForcibly()
+            } else {
+                proc.destroy()
+            }
         }
     }
 }

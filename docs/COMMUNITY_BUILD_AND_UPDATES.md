@@ -52,3 +52,29 @@ produced), so existing upstream debt and community-fork regressions can be
 classified before choosing fixes. No lint severity, security diagnostic,
 `abortOnError` or gate is disabled. A non-green run remains unqualified and
 must not be merged or released. Diagnostics are retained for 14 days.
+
+
+## Localization-debt baseline and safety repairs (2026-11-16)
+
+Hosted PR run 43953522627, commit d2fe47a388152715cf9465ea5211b64840a487cc,
+reported 454 blocking lint findings: 424 MissingTranslation, 20 ExtraTranslation,
+and 10 compatibility/thread/resource/Android TV findings. Only the 444
+translation findings are recorded in `lint-baseline.xml` as a **fixed,
+reviewed, incomplete-localization backlog**. Four settings strings newly added
+by this fork are included explicitly; English fallback remains available but
+full localization is **not** qualified. Do not treat the baseline as proof of
+translation completeness or a release acceptance gate. These entries must
+be reduced as translators provide equivalents; tests refuse silent growth,
+new issue families or safety/compatibility baselining.
+
+`lintDebug` and `lintRelease` retain `abortOnError = true`. All other lint
+finding types remain live, including API compatibility, exported components,
+threading and unsafe TLS. Runtime changes additionally gate the Android-30
+Controls provider with version-qualified bool resources, guard Process APIs
+on Android 7 and earlier, use NIO desugaring for API24, and read preferences
+on an I/O dispatcher. The category `LEANBACK_LAUNCHER` is present for Android TV.
+
+The translation backlog is an exception to full localization acceptance, not
+permission to ignore newly introduced lint issues. Unit tests, functional
+Shizuku/Sui/root validation, signed release and device acceptance remain
+independent and not automatically qualified by this source repair.

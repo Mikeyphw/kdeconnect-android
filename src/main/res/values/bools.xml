@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Small screens retain AndroidX Preference's default icon spacing. -->
+    <bool name="config_materialPreferenceIconSpaceReserved">true</bool>
+    <!-- ControlsProviderService requires Android 11+. -->
+    <bool name="kde_controls_provider_enabled">false</bool>
+</resources>

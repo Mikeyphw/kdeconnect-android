@@ -10,6 +10,10 @@ import android.util.TypedValue
 import android.view.View
 import androidx.preference.PreferenceViewHolder
 import androidx.preference.SwitchPreference
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.kde.kdeconnect.Device
 import org.kde.kdeconnect.plugins.Plugin
 import org.kde.kdeconnect.plugins.PluginFactory.getPluginInfo
@@ -46,10 +50,23 @@ class PluginPreference : SwitchPreference {
         super.onBindViewHolder(holder)
 
         val toggleListener = View.OnClickListener {
-            val newState = !device.isPluginEnabled(pluginKey)
-            isChecked = newState // It actually works on API<14
-            onStateChanged(holder, newState)
-            device.setPluginEnabled(pluginKey, newState)
+            // SharedPreferences can touch disk. Do not read it on the UI thread.
+            val itemView = holder.itemView
+            itemView.isEnabled = false
+            CoroutineScope(Dispatchers.Main.immediate).launch {
+                try {
+                    val newState = withContext(Dispatchers.IO) {
+                        !device.isPluginEnabled(pluginKey)
+                    }
+                    device.setPluginEnabled(pluginKey, newState)
+                    if (itemView.isAttachedToWindow) {
+                        isChecked = newState
+                        onStateChanged(holder, newState)
+                    }
+                } finally {
+                    itemView.isEnabled = true
+                }
+            }
         }
 
         val content = holder.findViewById(R.id.content)
