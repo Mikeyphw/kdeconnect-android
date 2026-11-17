@@ -21,6 +21,8 @@ jobs:
           java-version: '21'
       - name: Validate community workflow contracts
         run: python3 -m unittest discover -s tools -p 'test_community_actions_contract.py' -v
+      - name: Validate device and signed-release acceptance tooling
+        run: python3 -m unittest discover -s tools -p 'test_community_acceptance.py' -v
       # v4.0.4 (exact commit); v3 requests Google's removed SDK `tools` package.
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd
         with:

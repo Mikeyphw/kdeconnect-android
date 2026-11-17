@@ -199,27 +199,47 @@ object ReleaseUpdater {
         }
     }
 
+    /** Check each redirect *before* connecting; never trust only the final landing URL. */
+    internal fun validateDownloadHop(url: URL) {
+        require(url.protocol == "https" && (url.port == -1 || url.port == 443) &&
+            url.userInfo == null && url.ref == null &&
+            url.host.lowercase() in setOf(
+                "api.github.com", "github.com", "release-assets.githubusercontent.com",
+                "objects.githubusercontent.com"
+            )) { "Untrusted update redirect" }
+    }
+
     private fun openHttps(url: URL): HttpURLConnection {
-        require(url.protocol == "https") { "HTTPS required" }
-        require(url.host == "api.github.com" || url.host == "github.com") { "Untrusted update host" }
-        val conn = url.openConnection() as HttpURLConnection
-        conn.connectTimeout = 12000
-        conn.readTimeout = 30000
-        conn.setRequestProperty("User-Agent", "KDEConnect-Community-Updater")
-        conn.setRequestProperty("Accept", "application/vnd.github+json")
-        conn.instanceFollowRedirects = true
-        try {
-            require(conn.responseCode == 200) { "Release HTTP ${conn.responseCode}" }
-            // Asset redirects are GitHub-controlled; the downloaded APK is independently signed.
-            val actual = conn.url
-            require(actual.protocol == "https" && (
-                actual.host == "github.com" || actual.host == "api.github.com" ||
-                    actual.host == "release-assets.githubusercontent.com" ||
-                    actual.host == "objects.githubusercontent.com")) { "Untrusted redirect" }
-        } catch (e: Exception) {
-            conn.disconnect()
-            throw e
+        var next = url
+        // GitHub release assets normally use one CDN hop. Bound the chain in case
+        // an API response or release redirect is malformed or compromised.
+        repeat(5) {
+            validateDownloadHop(next)
+            val conn = next.openConnection() as HttpURLConnection
+            conn.connectTimeout = 12000
+            conn.readTimeout = 30000
+            conn.setRequestProperty("User-Agent", "KDEConnect-Community-Updater")
+            conn.setRequestProperty("Accept", "application/vnd.github+json")
+            conn.instanceFollowRedirects = false
+            val status = try { conn.responseCode } catch (e: Exception) {
+                conn.disconnect()
+                throw e
+            }
+            if (status in listOf(301, 302, 303, 307, 308)) {
+                val location = conn.getHeaderField("Location")
+                conn.disconnect()
+                require(!location.isNullOrBlank()) { "Missing update redirect Location" }
+                val resolved = URL(next, location)
+                validateDownloadHop(resolved) // BEFORE any network connection to this hop
+                next = resolved
+            } else {
+                if (status != 200) {
+                    conn.disconnect()
+                    throw IOException("Release HTTP $status")
+                }
+                return conn
+            }
         }
-        return conn
+        throw IOException("Update redirect limit exceeded")
     }
 }

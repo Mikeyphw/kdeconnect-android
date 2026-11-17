@@ -101,4 +101,29 @@ class ReleaseUpdaterTest {
         val asset = r.getJSONArray("assets").getJSONObject(0)
         r.getJSONArray("assets").put(JSONObject(asset.toString()))
     }
+
+    @Test fun acceptsOnlyHttpsOfficialRedirectHops() {
+        for (allowed in listOf(
+            "https://github.com/Mikeyphw/kdeconnect-android/releases",
+            "https://api.github.com/repos/Mikeyphw/kdeconnect-android/releases/latest",
+            "https://release-assets.githubusercontent.com/assets?id=valid",
+            "https://objects.githubusercontent.com/object?sig=valid"
+        )) {
+            ReleaseUpdater.validateDownloadHop(java.net.URL(allowed))
+        }
+        for (bad in listOf(
+            "http://github.com/release.apk",
+            "https://evil.invalid/release.apk",
+            "https://github.com.evil.invalid/release.apk",
+            "https://github.com:444/release.apk",
+            "https://user:pass@github.com/release.apk",
+            "https://github.com/release.apk#fragment",
+            "http://release-assets.githubusercontent.com/file"
+        )) {
+            try {
+                ReleaseUpdater.validateDownloadHop(java.net.URL(bad))
+                throw AssertionError("Accepted untrusted redirect hop: $bad")
+            } catch (_: IllegalArgumentException) { }
+        }
+    }
 }
