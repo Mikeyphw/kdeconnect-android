@@ -46,6 +46,8 @@ android {
         targetSdk = 37
         versionCode = System.getenv("KDE_FORK_VERSION_CODE")?.toIntOrNull() ?: 13703
         versionName = "1.37.3"
+        // QA capability exists only in explicitly labeled, signed QA variants.
+        buildConfigField("boolean", "KDE_SIGNED_QA_INSTALL", if (System.getenv("KDE_FORK_SIGNED_QA") == "1") "true" else "false")
         proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
     }
     buildFeatures {
@@ -82,6 +84,8 @@ android {
             val path = System.getenv("KDE_FORK_KEYSTORE")
             if (!path.isNullOrBlank()) {
                 storeFile = file(path)
+                // Existing private signing material is a PKCS#12 (.p12) store.
+                storeType = "pkcs12"
                 storePassword = System.getenv("KDE_FORK_STORE_PASSWORD")
                 keyAlias = System.getenv("KDE_FORK_KEY_ALIAS")
                 keyPassword = System.getenv("KDE_FORK_KEY_PASSWORD")
@@ -105,7 +109,7 @@ android {
         getByName("release") {
             // A distinct package prevents overwriting the official F-Droid/Play build.
             applicationIdSuffix = ".mikey"
-            versionNameSuffix = "-community"
+            versionNameSuffix = if (System.getenv("KDE_FORK_SIGNED_QA") == "1") "-community-qa" else "-community"
             if (!System.getenv("KDE_FORK_KEYSTORE").isNullOrBlank()) {
                 signingConfig = signingConfigs.getByName("communityRelease")
             }

@@ -21,6 +21,7 @@ jobs:
     env:
       KDE_FORK_VERSION_CODE: ${{ inputs.version_code }}
       RELEASE_TAG: ${{ inputs.tag }}
+      KDE_FORK_SIGNED_QA: '0'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,8 +50,8 @@ jobs:
           [[ "$KDE_FORK_VERSION_CODE" =~ ^[1-9][0-9]{0,8}$ ]] || exit 2
           [[ -n "$KEYSTORE_B64" && -n "$KDE_FORK_STORE_PASSWORD" && -n "$KDE_FORK_KEY_ALIAS" && -n "$KDE_FORK_KEY_PASSWORD" && -n "$KDE_FORK_SIGNING_CERT_SHA256" ]] || { echo 'Signing secrets or pinned certificate fingerprint unavailable'; exit 2; }
           [[ "$KDE_FORK_SIGNING_CERT_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]] || { echo 'Invalid pinned certificate fingerprint'; exit 2; }
-          # Baseline upstream source versionCode; never publish a lower initial community code.
-          (( 10#$KDE_FORK_VERSION_CODE > 13703 )) || { echo 'VersionCode must exceed upstream source baseline 13703'; exit 2; }
+          # Reserve signed QA versionCodes 13704..13708; production must be newer.
+          (( 10#$KDE_FORK_VERSION_CODE > 13708 )) || { echo 'Production versionCode must exceed QA reservation 13708'; exit 2; }
           path="$RUNNER_TEMP/kde-fork-release.jks"
           printf '%s' "$KEYSTORE_B64" | base64 --decode > "$path"
           chmod 0600 "$path"

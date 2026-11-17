@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -177,6 +178,120 @@ class DeviceEvidenceTests(unittest.TestCase):
         qa.snapshot(probe,qa.PACKAGE_DEBUG)
         self.assertEqual([x[0] for x in calls],['getprop','getprop','pm','dumpsys'])
         self.assertNotIn('install',repr(calls))
+
+
+class AutomaticDebugInstallTests(unittest.TestCase):
+    """Explicit, serial-bound, digest-bound ADB install; no implicit privilege."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.apk = self.base/'kdeconnect-android-debug.apk'
+        with zipfile.ZipFile(self.apk,'w',compression=zipfile.ZIP_STORED) as z:
+            z.writestr('AndroidManifest.xml', b'manifest')
+            z.writestr('classes.dex', b'dex'+b'x'*4096)
+        self.digest = qa.digest_file(self.apk)
+        self.args = argparse.Namespace(
+            transport='adb',serial='localhost:5555',package=qa.PACKAGE_DEBUG,
+            published_signed_update=False,source_commit=SOURCE,
+            install_debug_apk=self.apk, expected_apk_sha256=self.digest,
+            noninteractive=True, receipt=self.base/'receipt.json')
+
+    def test_explicit_install_is_strictly_bound_and_recorded(self):
+        calls=[]
+        def command(argv,timeout=45):
+            calls.append(argv)
+            return 'device\n' if 'get-state' in argv else 'Performing Streamed Install\nSuccess\n'
+        with patch.object(qa,'tool',return_value='adb'), \
+             patch.object(qa,'command_output',side_effect=command):
+            output=qa.install_verified_debug_apk(self.args)
+        self.assertEqual(output['status'],'INSTALLED_VIA_ADB')
+        self.assertEqual(output['artifact_sha256'],self.digest)
+        self.assertEqual(calls[0],['adb','-s','localhost:5555','get-state'])
+        self.assertEqual(calls[1],['adb','-s','localhost:5555','install','-r',str(self.apk)])
+        self.assertNotIn('-g',str(calls));self.assertNotIn('uninstall',str(calls))
+        self.assertFalse(output['production_release_qualified'])
+
+    def test_missing_sha_or_modified_apk_fail_before_adb(self):
+        with patch.object(qa,'tool',side_effect=AssertionError('adb must never run')):
+            self.args.expected_apk_sha256=None
+            with self.assertRaisesRegex(ValueError,'expected-apk-sha256'):
+                qa.install_verified_debug_apk(self.args)
+            self.args.expected_apk_sha256=self.digest
+            self.apk.write_bytes(self.apk.read_bytes()+b'modified')
+            with self.assertRaisesRegex(ValueError,'SHA-256'):
+                qa.install_verified_debug_apk(self.args)
+
+    def test_unsafe_transport_package_and_serial_refused(self):
+        with patch.object(qa,'tool',side_effect=AssertionError('adb must never run')):
+            for k,value in [('transport','root'),('package',qa.PACKAGE_RELEASE),
+                            ('published_signed_update',True),('serial',None),
+                            ('serial','emulator-5554 --evil')]:
+                with self.subTest(field=k):
+                    old=getattr(self.args,k)
+                    setattr(self.args,k,value)
+                    with self.assertRaises(ValueError):qa.install_verified_debug_apk(self.args)
+                    setattr(self.args,k,old)
+
+    def test_signed_release_cannot_use_automatic_install(self):
+        self.args.package=qa.PACKAGE_RELEASE
+        with self.assertRaises(ValueError):qa.install_verified_debug_apk(self.args)
+
+    def test_malformed_apk_refused_before_install(self):
+        self.apk.write_bytes(b'not a real apk'*100)
+        self.args.expected_apk_sha256=qa.digest_file(self.apk)
+        with patch.object(qa,'tool',side_effect=AssertionError('adb must never run')):
+            with self.assertRaisesRegex(ValueError,'valid APK'):
+                qa.install_verified_debug_apk(self.args)
+
+    def test_wrong_adb_state_or_missing_success_refused(self):
+        with patch.object(qa,'tool',return_value='adb'), \
+             patch.object(qa,'command_output',return_value='offline\n'):
+            with self.assertRaisesRegex(ValueError,'device state'):
+                qa.install_verified_debug_apk(self.args)
+        with patch.object(qa,'tool',return_value='adb'), \
+             patch.object(qa,'command_output',side_effect=['device\n','something unexpected']):
+            with self.assertRaisesRegex(ValueError,'successful'):
+                qa.install_verified_debug_apk(self.args)
+
+    def test_cli_records_install_only_after_success(self):
+        device={'schema':'device', 'fully_device_qualified':False}
+        with patch.object(qa,'install_verified_debug_apk',return_value={'status':'INSTALLED_VIA_ADB'}), \
+             patch.object(qa,'run_device',return_value=device), \
+             patch.object(qa,'private_json_write') as write:
+            code=qa.main(['device','--transport','adb','--serial','localhost:5555',
+                          '--source-commit',SOURCE,'--install-debug-apk',str(self.apk),
+                          '--expected-apk-sha256',self.digest,
+                          '--receipt',str(self.base/'rec.json'),'--noninteractive'])
+        self.assertEqual(code,0)
+        self.assertEqual(write.call_args.args[1]['debug_install']['status'],'INSTALLED_VIA_ADB')
+        self.assertFalse(device['fully_device_qualified'])
+
+
+class SignedQaDeviceEvidenceTests(unittest.TestCase):
+    def test_qa_candidates_separate_from_published_release_acceptance(self):
+        args=argparse.Namespace(transport='adb', serial='localhost:5555',package=qa.PACKAGE_RELEASE,
+             source_commit=SOURCE,published_signed_update=False,qa_signed_candidates=True,
+             noninteractive=True)
+        snapshot={'sdk':'36','fingerprint':'test/device','package_name':qa.PACKAGE_RELEASE,
+                  'version_code':13704,'app_installed':True}
+        with patch.object(qa,'snapshot',return_value=snapshot):
+            receipt=qa.run_device(args)
+        self.assertTrue(receipt['qa_only'])
+        self.assertFalse(receipt['signed_release_qualified'])
+        self.assertFalse(receipt['fully_device_qualified'])
+        self.assertEqual(receipt['operator_observed_count'],0)
+        self.assertEqual(receipt['blocked_count'],len(qa.CASES))
+        self.assertTrue(any(x['requires_qa_signed_candidate'] for x in receipt['tests']))
+
+    def test_mutually_exclusive_published_and_qa_flags(self):
+        args=argparse.Namespace(transport='adb', serial='localhost:5555',package=qa.PACKAGE_RELEASE,
+             source_commit=SOURCE,published_signed_update=True,qa_signed_candidates=True,
+             noninteractive=True)
+        with patch.object(qa,'snapshot',return_value={}):
+            with self.assertRaisesRegex(ValueError,'OR QA candidate'):
+                qa.run_device(args)
 
 
 class RepositorySafetyContracts(unittest.TestCase):

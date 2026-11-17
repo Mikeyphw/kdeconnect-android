@@ -40,7 +40,7 @@ On a device that you control, inspect the APK and explicitly install it through
 Android's installation UI or a separate approved ADB command. **Do not** install
 an untrusted or unverified APK. Installing into `.debug` may coexist with
 `org.kde.kdeconnect_tp.mikey`; choose a test device and back up pairing data first.
-The QA script never installs apps, reboots, requests root, or changes settings.
+The default QA mode never installs apps, reboots, requests root, or changes settings; the explicit `--install-debug-apk` mode is the only installation exception.
 
 ```sh
 # Run from a checkout containing tools/community_acceptance.py.
@@ -58,6 +58,36 @@ python3 -B tools/community_acceptance.py device \
   --source-commit "$(git rev-parse HEAD)" \
   --receipt "$HOME/.local/state/kdeconnect-qa/device-root-observation.json"
 ```
+
+### Optional explicit, automatic debug APK installation
+
+For the PR HEAD `4955804df3fa19ff671456c7d8797020f9cf478d`, the green
+GitHub Actions run `44001383455` has an independently obtained debug APK
+artifact `kdeconnect-community-debug-9fdedad56c19e66378f90e2a80f5d55382267bd1`.
+The APK SHA-256 is `9635b2ce4471d26224d904c9ebc9651e8fa58b0812994a95761647cc282e3a01`.
+The following **explicit opt-in** installs this exact APK through ADB *before*
+the interactive QA questions. Check `adb -s localhost:5555 get-state` first.
+On-device Termux ADB must be paired/authorized; multiple ADB devices require
+choosing the serial explicitly. Android's package signature conflict is never
+silently solved by uninstalling an existing app.
+
+```sh
+python3 -B tools/community_acceptance.py device \
+  --transport adb --serial localhost:5555 \
+  --package org.kde.kdeconnect_tp.debug \
+  --source-commit 4955804df3fa19ff671456c7d8797020f9cf478d \
+  --install-debug-apk /trusted/path/kdeconnect-android-debug.apk \
+  --expected-apk-sha256 9635b2ce4471d26224d904c9ebc9651e8fa58b0812994a95761647cc282e3a01 \
+  --receipt "$HOME/.local/state/kdeconnect-qa/device-debug.json"
+```
+
+This mode checks a strict SHA-256 and APK ZIP structure before invoking
+`adb -s SERIAL install -r APK` (without `-g`, root or uninstall), verifies the
+selected device reports `device`, and requires an explicit `Success`. The new
+`debug_install` receipt distinguishes an ADB install from manual QA observations;
+neither proves a production signing certificate or production updater behavior.
+The bundled opt-in QA runner can include the exact artifact and avoid an
+additional download/extraction step. It is **not** a signed release.
 
 The script captures Android SDK, device fingerprint, installed package and
 versionCode **locally** (receipt mode 0600) and prompts for observed outcomes:
@@ -158,3 +188,55 @@ expected on the device. Debug APKs cannot substitute: they use `.debug`.
 Approval/merge is a separate human action **after** these gates pass. Release
 publication is later and still requires a different explicit authorization.
 The two cannot be truthfully conflated.
+
+
+## Consolidated pre-merge, signed QA qualification (new)
+
+The new `.github/workflows/signed-qa.yml` is **not** a release workflow. It
+runs only on an explicitly pushed `kde-qa-<40-character-PR-HEAD>` Git tag,
+requires the owner actor and an exact-match green PR source commit before it
+reads the signing secrets, and targets the `community-signing-qa` GitHub
+Environment. **Configure required reviewers before triggering the QA tag:**
+merely naming an environment does not create a reviewer-approval gate.
+Without configured protection, the owner-created tag is the only explicit
+signing authorization.
+It generates *signed, QA-only* APKs with versionCodes **13704–13708**, all
+signed with the existing trusted community key, and posts them only to
+short-retention Actions artifacts. No tag is created automatically. No GitHub
+Release, production `update.json`, secret, or private keystore is published.
+
+The QA-only APKs use package `org.kde.kdeconnect_tp.mikey` and versionName
+`1.37.3-community-qa`, with a compile-time gated local APK picker. The picker
+is **absent in production builds**, accepts only explicit user-selected
+`content://` APK documents, copies them with a byte-size limit into private
+cache, and applies the *same* PackageManager package/version/signer identity
+check as the normal updater before using the selected installer mode. The
+normal updater still only checks published stable GitHub Releases.
+
+**Important:** These QA APKs have real production-package signing identity.
+Use a disposable test state (back up application data) before installing the
+first one. To test Android, Shizuku, Sui and root in sequence without resetting
+app data, install code 13704, then use the QA-only picker to advance to 13705,
+13706, 13707 and 13708 with the selected installation modes. For denial tests,
+try denied permissions without consuming a versionCode. The QA tool does not
+automatically root, uninstall, or bypass a system confirmation UI.
+
+After the signed QA tag run succeeds, download the five workflow artifacts
+with `gh run download <RUN_ID> -R Mikeyphw/kdeconnect-android --dir <PRIVATE_DIR>`.
+Verify each candidate using `tools/signed_qa.py verify` against the
+independently trusted fingerprint (not solely against a GitHub-hosted value),
+and compare device-installed certificate/version before and after the tests.
+The QA artifacts must never be published as a stable release.
+
+**Reserved QA version codes: 13704–13708.** The first production release
+must have `versionCode >= 13709`, or an existing QA installation could prevent
+an in-place update. `test_signed_qa_contract.py` ensures that QA mode is
+opt-in and separate from production/release signing.
+
+This workflow cannot be dispatched with `workflow_dispatch` pre-merge because
+the workflow is absent from `master`. A deliberately created *lightweight*
+Git tag at the verified feature HEAD is the supported trigger. The official
+release workflow still publishes only after an explicit approved dispatch on
+`master`, and the actual end-to-end in-app updater can only be qualified once
+a stable release exists. No signed-QA green check substitutes for human PR
+approval, device observations or release evidence.

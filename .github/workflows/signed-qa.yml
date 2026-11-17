@@ -1,0 +1,152 @@
+# Explicit, commit-bound QA tag only. Never create a GitHub Release or expose signing keys.
+name: Signed community QA candidates (manual tag)
+on:
+  push:
+    tags:
+      - 'kde-qa-*'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qa-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Refuse unapproved branch or unqualified source
+        id: source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == 'Mikeyphw/kdeconnect-android' ]]
+          [[ "$GITHUB_ACTOR" == 'Mikeyphw' ]]
+          [[ "$GITHUB_REF" == "refs/tags/kde-qa-$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          head=$(gh api "repos/$GITHUB_REPOSITORY/pulls/1" --jq '.head.sha')
+          [[ "$head" == "$GITHUB_SHA" ]] || { echo 'QA tag no longer targets PR #1 HEAD' >&2; exit 2; }
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=pull_request&head_sha=$GITHUB_SHA&per_page=100")
+          jq -e 'any(.workflow_runs[]; .name == "Android community build" and .status == "completed" and .conclusion == "success")' <<< "$runs"
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - name: Verify source-based QA isolation contracts
+        run: |
+          python3 -m unittest discover -s tools -p 'test_community_acceptance.py' -v
+          python3 -m unittest discover -s tools -p 'test_signed_qa_contract.py' -v
+
+  signed-candidate:
+    needs: qa-preflight
+    if: needs.qa-preflight.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: community-signing-qa
+    strategy:
+      fail-fast: false
+      matrix:
+        version_code: [13704, 13705, 13706, 13707, 13708]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd
+        with:
+          packages: 'platform-tools'
+      - name: Install private keystore into runner temp
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.KDE_FORK_KEYSTORE_BASE64 }}
+          KDE_FORK_STORE_PASSWORD: ${{ secrets.KDE_FORK_STORE_PASSWORD }}
+          KDE_FORK_KEY_ALIAS: ${{ secrets.KDE_FORK_KEY_ALIAS }}
+          KDE_FORK_KEY_PASSWORD: ${{ secrets.KDE_FORK_KEY_PASSWORD }}
+          KDE_FORK_SIGNING_CERT_SHA256: ${{ secrets.KDE_FORK_SIGNING_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          [[ -n "$KEYSTORE_B64" && -n "$KDE_FORK_STORE_PASSWORD" && -n "$KDE_FORK_KEY_ALIAS" && -n "$KDE_FORK_KEY_PASSWORD" ]]
+          [[ "$KDE_FORK_SIGNING_CERT_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]]
+          path="$RUNNER_TEMP/kde-signed-qa.jks"
+          (umask 077; printf '%s' "$KEYSTORE_B64" | base64 --decode > "$path")
+          [[ -s "$path" ]]
+          echo "KDE_FORK_KEYSTORE=$path" >> "$GITHUB_ENV"
+      - name: Build signed, isolated QA release candidate
+        env:
+          KDE_FORK_SIGNED_QA: '1'
+          KDE_FORK_VERSION_CODE: ${{ matrix.version_code }}
+          KDE_FORK_STORE_PASSWORD: ${{ secrets.KDE_FORK_STORE_PASSWORD }}
+          KDE_FORK_KEY_ALIAS: ${{ secrets.KDE_FORK_KEY_ALIAS }}
+          KDE_FORK_KEY_PASSWORD: ${{ secrets.KDE_FORK_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon --console=plain -Pci testReleaseUnitTest lintRelease assembleRelease
+      - name: Verify signer, APK package/version and create QA-only receipt
+        shell: bash
+        env:
+          KDE_FORK_SIGNING_CERT_SHA256: ${{ secrets.KDE_FORK_SIGNING_CERT_SHA256 }}
+          QA_VERSION_CODE: ${{ matrix.version_code }}
+        run: |
+          set -euo pipefail
+          mapfile -t apks < <(find build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print)
+          [[ ${#apks[@]} -eq 1 ]] || { echo 'Not exactly one signed QA APK' >&2; exit 3; }
+          mkdir -p "qa/${QA_VERSION_CODE}"
+          cp -- "${apks[0]}" "qa/${QA_VERSION_CODE}/kdeconnect-community.apk"
+          python3 -B tools/signed_qa.py attest \
+            --apk "qa/${QA_VERSION_CODE}/kdeconnect-community.apk" \
+            --metadata "qa/${QA_VERSION_CODE}/qa.json" \
+            --expected-cert "$KDE_FORK_SIGNING_CERT_SHA256" \
+            --expected-source "$GITHUB_SHA" \
+            --expected-code "$QA_VERSION_CODE"
+      - name: Clean keystore from runner
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${KDE_FORK_KEYSTORE:-}" && -f "$KDE_FORK_KEYSTORE" ]]; then
+            rm -f -- "$KDE_FORK_KEYSTORE"
+          fi
+      - name: Upload strictly QA-only signed APK and metadata
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kdeconnect-signed-qa-${{ github.sha }}-${{ matrix.version_code }}
+          path: qa/${{ matrix.version_code }}/
+          if-no-files-found: error
+          retention-days: 3
+
+  verify-signed-pair:
+    needs: [qa-preflight, signed-candidate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd
+        with:
+          packages: 'platform-tools'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kdeconnect-signed-qa-${{ github.sha }}-*
+          path: signed-artifacts/
+          merge-multiple: false
+      - name: Independently verify complete same-signer increasing-code chain
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B tools/signed_qa_pair.py \
+            --directory signed-artifacts \
+            --expected-source "$GITHUB_SHA" \
+            --receipt "$RUNNER_TEMP/qa-chain.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kdeconnect-signed-qa-chain-${{ github.sha }}
+          path: ${{ runner.temp }}/qa-chain.json
+          if-no-files-found: error
+          retention-days: 3

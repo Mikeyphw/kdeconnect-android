@@ -5,6 +5,8 @@
 package org.kde.kdeconnect.updates
 
 import android.os.Bundle
+import java.io.File
+import androidx.activity.result.contract.ActivityResultContracts
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.LinearLayout
@@ -32,6 +34,36 @@ class UpdaterActivity : AppCompatActivity() {
     private lateinit var shizukuButton: Button
 
     private val preferences by lazy { PreferenceManager.getDefaultSharedPreferences(this) }
+
+    private val signedQaPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null || !BuildConfig.KDE_SIGNED_QA_INSTALL) return@registerForActivityResult
+        status.text = "Importing and verifying selected QA APK…"
+        scope.launch {
+            try {
+                val apk = withContext(Dispatchers.IO) {
+                    ReleaseUpdater.importSignedQaCandidate(this@UpdaterActivity, uri)
+                }
+                status.text = "Selected QA APK verified; invoking explicitly selected installer…"
+                installSelectedMode(apk)
+                status.append("\nInstaller submitted; check system confirmation / result.")
+            } catch (e: Exception) {
+                status.text = "QA install refused: ${e.message}"
+            }
+        }
+    }
+
+    private suspend fun installSelectedMode(apk: File) {
+        when (preferences.getInt(KEY_INSTALLER, 0)) {
+            2 -> PrivilegedUpdateInstall.installViaShizuku(this, apk)
+            3 -> PrivilegedUpdateInstall.installViaRoot(apk) { count, length ->
+                runOnUiThread { status.text = "Streaming QA APK to root: ${count * 100L / length}%" }
+            }
+            0 -> if (PrivilegedUpdateInstall.isShizukuAuthorized()) {
+                PrivilegedUpdateInstall.installViaShizuku(this, apk)
+            } else ReleaseUpdater.installWithAndroid(this, apk)
+            else -> ReleaseUpdater.installWithAndroid(this, apk)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -113,19 +145,8 @@ class UpdaterActivity : AppCompatActivity() {
                                 runOnUiThread { status.text = "Downloading APK: $pct% ($count / $length bytes)" }
                             }
                         }
-                        val selected = preferences.getInt(KEY_INSTALLER, 0)
                         status.text = "APK verified: SHA-256, package, version and installed signing certificate."
-                        when (selected) {
-                            2 -> PrivilegedUpdateInstall.installViaShizuku(this@UpdaterActivity, apk)
-                            3 -> PrivilegedUpdateInstall.installViaRoot(apk) { count, length ->
-                                val pct = (count * 100L / length).toInt()
-                                runOnUiThread { status.text = "Streaming APK to root installer: $pct%" }
-                            }
-                            0 -> if (PrivilegedUpdateInstall.isShizukuAuthorized()) {
-                                PrivilegedUpdateInstall.installViaShizuku(this@UpdaterActivity, apk)
-                            } else ReleaseUpdater.installWithAndroid(this@UpdaterActivity, apk)
-                            else -> ReleaseUpdater.installWithAndroid(this@UpdaterActivity, apk)
-                        }
+                        installSelectedMode(apk)
                         status.append("\nInstaller started; check system confirmation or result.")
                     } catch (e: Exception) {
                         status.text = "Install failed or refused: ${e.message}"
@@ -137,6 +158,15 @@ class UpdaterActivity : AppCompatActivity() {
             }
         }
         root.addView(installButton)
+        if (BuildConfig.KDE_SIGNED_QA_INSTALL) {
+            root.addView(Button(this).apply {
+                text = "QA ONLY · Install local same-signer test APK"
+                setOnClickListener {
+                    // Explicit user action; picker grants read access for one candidate.
+                    signedQaPicker.launch(arrayOf("application/vnd.android.package-archive", "application/octet-stream"))
+                }
+            })
+        }
     }
 
     override fun onDestroy() {

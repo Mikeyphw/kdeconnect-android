@@ -171,6 +171,62 @@ object ReleaseUpdater {
         }
     }
 
+    /** Import a user-picked QA APK ONLY in signed, explicitly gated QA builds.
+     *  The copied file is size-bounded, and the archive must match the current
+     *  installed signing identity, package, and strictly newer versionCode.
+     */
+    fun importSignedQaCandidate(context: Context, uri: Uri): File {
+        check(BuildConfig.KDE_SIGNED_QA_INSTALL) { "Local APK imports are not available in production" }
+        require(uri.scheme == "content") { "Only content-provider APK selection is supported" }
+        val dir = File(context.cacheDir, "updates")
+        require((dir.exists() || dir.mkdirs()) && dir.isDirectory) { "Cannot prepare QA update cache" }
+        val partial = File(dir, "qa-import.partial.apk")
+        partial.delete()
+        try {
+            val input = requireNotNull(context.contentResolver.openInputStream(uri)) { "Unable to read selected APK" }
+            var total = 0L
+            input.use { source ->
+                partial.outputStream().use { output ->
+                    val buf = ByteArray(65536)
+                    while (true) {
+                        val n = source.read(buf)
+                        if (n < 0) break
+                        total += n
+                        require(total <= MAX_APK_SIZE) { "QA APK exceeds safe size limit" }
+                        output.write(buf, 0, n)
+                    }
+                    output.fd.sync()
+                }
+            }
+            require(total >= 1024) { "QA APK is too small" }
+            val archive = requireNotNull(getArchive(context, partial)) { "Invalid QA APK" }
+            val code = if (Build.VERSION.SDK_INT >= 28) archive.longVersionCode else archive.versionCode.toLong()
+            val name = requireNotNull(archive.versionName) { "QA APK version name missing" }
+            require(name.endsWith("-community-qa")) { "Only signed QA-to-QA upgrades are allowed" }
+            val digest = MessageDigest.getInstance("SHA-256")
+            partial.inputStream().use { stream ->
+                val buf = ByteArray(65536)
+                while (true) {
+                    val n = stream.read(buf)
+                    if (n < 0) break
+                    digest.update(buf, 0, n)
+                }
+            }
+            val sha = digest.digest().joinToString("") { "%02x".format(it) }
+            val identity = AvailableUpdate(
+                code, name, "qa-local", "Explicit local QA candidate", sha,
+                URL("https://github.com/$REPO"), total
+            )
+            verifyApkIdentity(context, partial, identity)
+            val verified = File(dir, "qa-verified-$code.apk")
+            if (verified.exists() && !verified.delete()) throw IOException("Cannot replace cached QA APK")
+            if (!partial.renameTo(verified)) throw IOException("Cannot finalize signed QA APK")
+            return verified
+        } finally {
+            partial.delete()
+        }
+    }
+
     fun installWithAndroid(context: Context, verifiedApk: File) {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", verifiedApk)
         val intent = Intent(Intent.ACTION_VIEW).apply {
