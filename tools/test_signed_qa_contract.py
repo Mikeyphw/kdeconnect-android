@@ -96,6 +96,52 @@ class AndroidSignerReportCompatibility(unittest.TestCase):
             with self.subTest(report=report), self.assertRaises(qa.Rejected):
                 qa.parse_verified_signer_report(report)
 
+    def test_verified_report_variants_and_colon_digest(self):
+        colon = ':'.join(CERT[i:i+2] for i in range(0, 64, 2))
+        for report in (
+            'Verifies\nSigner #1 (minSdkVersion=24, maxSdkVersion=35) '
+            'certificate SHA-256 digest: '+CERT+'\n',
+            'Verifies\nSigner #1 certificate SHA-256 digest: '+colon+'\n',
+            'Signer #1 certificate SHA-256 digest: '+CERT+'\n'
+            'Signer (minSdkVersion=24, maxSdkVersion=35) certificate SHA-256 digest: '+CERT+'\n',
+        ):
+            with self.subTest(report_kind=report.splitlines()[1].split(' certificate')[0]):
+                self.assertEqual(qa.parse_verified_signer_report(report), CERT)
+
+    def test_same_certificate_from_a_second_numbered_signer_is_rejected(self):
+        for report in (
+            'Signer #1 certificate SHA-256 digest: '+CERT+'\n'
+            'Signer #2 certificate SHA-256 digest: '+CERT+'\n',
+            'Signer #1 certificate SHA-256 digest: '+CERT+'\n'
+            'Signer #2 certificate SHA-1 digest: '+'a'*40+'\n',
+            'Signer #1 certificate SHA-256 digest: '+CERT+'\nNumber of signers: 2\n',
+        ):
+            with self.subTest(report=report), self.assertRaises(qa.Rejected):
+                qa.parse_verified_signer_report(report)
+
+    def test_diagnostic_never_discloses_certificate_or_dn(self):
+        sensitive = 'Private signing DN secret'
+        report = ('Signer unfamiliar certificate SHA-256 digest: '+CERT+'\n'
+                  'Signer #1 certificate DN: '+sensitive+'\n')
+        with patch.object(qa, 'inspect_tool', return_value=report):
+            with self.assertRaises(qa.Rejected) as caught:
+                qa.inspected_signer(Path('/tmp/irrelevant.apk'))
+        message = str(caught.exception)
+        self.assertIn('apksigner_report_shape=', message)
+        self.assertNotIn(CERT, message)
+        self.assertNotIn(sensitive, message)
+        self.assertNotIn('unfamiliar', message)
+
+    def test_invalid_or_unrecognized_digest_refused(self):
+        for report in (
+            'Signer #1 certificate SHA-256 digest: not-a-sha\n',
+            'Signer #1 certificate SHA-256 digest: '+CERT[:-1]+'\n',
+            'Signer unknown certificate SHA-256 digest: '+CERT+'\n',
+            'Signer #0 certificate SHA-256 digest: '+CERT+'\n',
+        ):
+            with self.subTest(report=report), self.assertRaises(qa.Rejected):
+                qa.parse_verified_signer_report(report)
+
     def test_inspected_signer_requires_real_successful_apksigner_verify(self):
         report='Signer (minSdkVersion=24, maxSdkVersion=32) certificate SHA-256 digest: '+CERT+'\n'
         with patch.object(qa,'inspect_tool',return_value=report) as call:

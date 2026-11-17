@@ -54,38 +54,93 @@ def apk_hash(apk: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-# Android apksigner may report the signer as '#1' or as an SDK range.
-# Both formats are documented in AOSP's check_target_files_signatures.py.
-# All verifier-reported certificate digests must resolve to one identity.
-SIGNER_SHA256_LINE = re.compile(
-    r'^Signer (?:#[0-9]+|\(minSdkVersion=[0-9]+(?:, maxSdkVersion=[0-9]+)?\)) '
-    r'certificate SHA-256 digest:\s*([a-fA-F0-9]{64})\s*$', re.MULTILINE)
-SIGNER_SHA256_ANY = re.compile(r'^Signer .* certificate SHA-256 digest:', re.MULTILINE)
-SIGNER_COUNT = re.compile(r'^Number of signers:\s*(\d+)\s*$', re.MULTILINE)
+# Android build-tools have used both numbered signer labels and SDK-range
+# labels. Parse only verified apksigner rows, never an untrusted manifest or
+# keytool fallback. Any unrecognized SHA-256 signer row fails closed.
+SIGNER_SHA256_ROW = re.compile(
+    r'^Signer\s+(?P<label>.+?)\s+certificate SHA-256 digest:\s*'
+    r'(?P<digest>\S(?:.*\S)?)\s*$', re.MULTILINE)
+SIGNER_SDK_RANGE = re.compile(
+    r'^\(minSdkVersion=\d+(?:,\s*maxSdkVersion=\d+)?\)$')
+SIGNER_NUMBER = re.compile(
+    r'^#(?P<index>[1-9]\d*)(?:\s+(?P<sdk>\(minSdkVersion=\d+'
+    r'(?:,\s*maxSdkVersion=\d+)?\)))?$')
+SIGNER_COUNT = re.compile(r'^Number of signers:\s*(\S+)\s*$', re.MULTILINE)
+HEX_COLON_SHA256 = re.compile(r'^(?:[a-fA-F0-9]{2}:){31}[a-fA-F0-9]{2}$')
+
+
+def report_shape(report: str) -> str:
+    """Bounded structural diagnostics without certificate bytes, DNs or secrets."""
+    lines = report.splitlines()
+    candidates = [line for line in lines
+                  if line.startswith('Signer ') and 'certificate SHA-256' in line]
+    kinds: list[str] = []
+    widths: list[int] = []
+    for line in candidates[:12]:
+        match = SIGNER_SHA256_ROW.fullmatch(line)
+        if match is None:
+            kinds.append('unparsed')
+            widths.append(0)
+            continue
+        label = match.group('label')
+        kinds.append('numbered' if label.startswith('#') else
+                     'sdk-range' if label.startswith('(') else 'other')
+        widths.append(min(len(match.group('digest')), 256))
+    return ('lines='+str(min(len(lines), 9999))+
+            ' sha256_rows='+str(len(candidates))+
+            ' label_kinds='+','.join(kinds)+
+            ' digest_widths='+','.join(map(str,widths)))
 
 
 def parse_verified_signer_report(report: str) -> str:
-    """Parse *already verified* apksigner output, rejecting rotations/multiple keys.
+    """Require one trusted certificate identity over every verified SDK range.
 
-    The caller must execute `apksigner verify` successfully, not merely supply
-    unsigned APK metadata, a keytool report, or a manifest certificate claim.
+    `inspect_tool` must have successfully executed `apksigner verify` first.
+    This function never treats arbitrary text as a signature verification.
     """
-    digests = [d.lower() for d in SIGNER_SHA256_LINE.findall(report)]
-    recognized = len(digests)
-    total = len(SIGNER_SHA256_ANY.findall(report))
-    must(recognized > 0 and recognized == total,
-         'Missing or unrecognized apksigner SHA-256 certificate output')
+    candidates = [line for line in report.splitlines()
+                  if line.startswith('Signer ') and 'certificate SHA-256' in line]
+    must(bool(candidates), 'Missing apksigner SHA-256 certificate output')
+    digests: list[str] = []
+    for line in candidates:
+        row = SIGNER_SHA256_ROW.fullmatch(line)
+        must(row is not None, 'Unrecognized apksigner SHA-256 signer row')
+        label = row.group('label')
+        match = SIGNER_NUMBER.fullmatch(label)
+        if match is not None:
+            must(int(match.group('index')) == 1, 'Multiple APK signers detected')
+        else:
+            must(SIGNER_SDK_RANGE.fullmatch(label) is not None,
+                 'Unrecognized apksigner signer label')
+        digest = row.group('digest')
+        if HEX_COLON_SHA256.fullmatch(digest):
+            digest = digest.replace(':', '')
+        must(SHA64.fullmatch(digest) is not None,
+             'Invalid apksigner SHA-256 certificate digest')
+        digests.append(digest.lower())
+
+    # Some tool versions emit an explicit count; do not require it when absent.
+    counts = SIGNER_COUNT.findall(report)
+    must(all(x == '1' for x in counts), 'Multiple APK signers detected')
+    # Reject a second numbered signer even if a tool omitted its SHA-256 row.
+    for line in report.splitlines():
+        n = re.match(r'^Signer #([0-9]+)(?:\s|$)', line)
+        if n is not None:
+            must(n.group(1) == '1', 'Multiple APK signers detected')
     must(len(set(digests)) == 1,
          'Multiple distinct signing certificates detected across APK SDK ranges')
-    must(all(int(n) == 1 for n in SIGNER_COUNT.findall(report)),
-         'Multiple APK signers detected')
     return digests[0]
 
 
 def inspected_signer(apk: Path) -> str:
     report = inspect_tool('apksigner', [
         'verify', '--min-sdk-version', '24', '--verbose', '--print-certs', str(apk)])
-    return parse_verified_signer_report(report)
+    try:
+        return parse_verified_signer_report(report)
+    except Rejected as exc:
+        # No raw apksigner output is logged or persisted, and no fallback
+        # weakens the certificate pin or successful verify requirement.
+        raise Rejected(f'{exc}; apksigner_report_shape={report_shape(report)}') from exc
 
 def inspected_identity(apk: Path) -> tuple[str,int,str]:
     report=inspect_tool('aapt',['dump','badging',str(apk)])
