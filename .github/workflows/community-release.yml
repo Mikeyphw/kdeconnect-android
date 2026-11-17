@@ -104,18 +104,17 @@ jobs:
           apk=$(find build/outputs/apk/release -maxdepth 1 -name '*.apk' -type f | head -1)
           test -n "$apk"
           cp "$apk" release/kdeconnect-community.apk
-          apksigner=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)
-          test -n "$apksigner"
-          "$apksigner" verify --verbose --print-certs release/kdeconnect-community.apk > "$RUNNER_TEMP/apksigner-result.txt"
-          APKSIGNER_RESULT="$RUNNER_TEMP/apksigner-result.txt" python3 - <<'PYSIGNER'
-          import os, re
-          with open(os.environ['APKSIGNER_RESULT'], encoding='utf-8') as f:
-              report = f.read()
-          digests = re.findall(r'Signer #\d+ certificate SHA-256 digest:\s*([0-9a-fA-F]{64})', report)
+          # One shared strict apksigner parser for QA and production, including
+          # SDK-range signer rows; the APK signature must actually verify.
+          python3 -B - <<'PYSIGNER'
+          import os
+          from pathlib import Path
+          from tools.signed_qa import inspected_signer
           pinned = os.environ['KDE_FORK_SIGNING_CERT_SHA256'].lower()
-          if len(digests) != 1 or digests[0].lower() != pinned:
+          actual = inspected_signer(Path('release/kdeconnect-community.apk'))
+          if actual != pinned:
               raise SystemExit('APK signing identity differs from configured pinned release certificate')
-          print('Pinned APK signing certificate verified:', pinned)
+          print('Pinned APK signing certificate verified:', actual)
           PYSIGNER
           aapt=$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -1)
           test -n "$aapt"

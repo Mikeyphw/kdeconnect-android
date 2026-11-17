@@ -240,3 +240,23 @@ release workflow still publishes only after an explicit approved dispatch on
 `master`, and the actual end-to-end in-app updater can only be qualified once
 a stable release exists. No signed-QA green check substitutes for human PR
 approval, device observations or release evidence.
+
+### Signed-QA verifier and dependency reliability (2026-11-17)
+
+Android `apksigner` may identify the same verified certificate as either
+`Signer #1` or `Signer (minSdkVersion=24, maxSdkVersion=32)`, with repeated
+SDK-range rows. The shared verifier accepts these report formats **only** if
+signature verification succeeds and the reported signer SHA-256 identities all
+agree with the independently pinned certificate. Missing/malformed, mixed
+certificate or multiple-signer output remains a blocking failure. The
+production release uses the same strict verifier, not a divergent regex.
+
+The signed candidate matrix now limits simultaneous Gradle resolutions to two
+and retries **only** Maven HTTP 429 up to three logged attempts; test, build,
+lint, signing and all other errors remain fatal. This does not weaken any gate.
+
+**Important tag semantics:** The previously created `kde-qa-2f8a19a...`
+ref is immutable and retains the failed source revision. After a native fix is
+committed and the NEW PR HEAD CI is green, create a distinct explicit
+`kde-qa-<NEW_PR_HEAD>` tag as in the signed-QA procedure. Do not rewrite or
+delete the old tag, and do not rerun its outdated source to qualify a new commit.

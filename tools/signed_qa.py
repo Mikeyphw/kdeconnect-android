@@ -54,11 +54,38 @@ def apk_hash(apk: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+# Android apksigner may report the signer as '#1' or as an SDK range.
+# Both formats are documented in AOSP's check_target_files_signatures.py.
+# All verifier-reported certificate digests must resolve to one identity.
+SIGNER_SHA256_LINE = re.compile(
+    r'^Signer (?:#[0-9]+|\(minSdkVersion=[0-9]+(?:, maxSdkVersion=[0-9]+)?\)) '
+    r'certificate SHA-256 digest:\s*([a-fA-F0-9]{64})\s*$', re.MULTILINE)
+SIGNER_SHA256_ANY = re.compile(r'^Signer .* certificate SHA-256 digest:', re.MULTILINE)
+SIGNER_COUNT = re.compile(r'^Number of signers:\s*(\d+)\s*$', re.MULTILINE)
+
+
+def parse_verified_signer_report(report: str) -> str:
+    """Parse *already verified* apksigner output, rejecting rotations/multiple keys.
+
+    The caller must execute `apksigner verify` successfully, not merely supply
+    unsigned APK metadata, a keytool report, or a manifest certificate claim.
+    """
+    digests = [d.lower() for d in SIGNER_SHA256_LINE.findall(report)]
+    recognized = len(digests)
+    total = len(SIGNER_SHA256_ANY.findall(report))
+    must(recognized > 0 and recognized == total,
+         'Missing or unrecognized apksigner SHA-256 certificate output')
+    must(len(set(digests)) == 1,
+         'Multiple distinct signing certificates detected across APK SDK ranges')
+    must(all(int(n) == 1 for n in SIGNER_COUNT.findall(report)),
+         'Multiple APK signers detected')
+    return digests[0]
+
+
 def inspected_signer(apk: Path) -> str:
-    report=inspect_tool('apksigner',['verify','--min-sdk-version','24','--verbose','--print-certs',str(apk)])
-    digests=re.findall(r'Signer #\d+ certificate SHA-256 digest:\s*([a-fA-F0-9]{64})',report)
-    must(len(digests)==1,'APK must have exactly one verified signer')
-    return digests[0].lower()
+    report = inspect_tool('apksigner', [
+        'verify', '--min-sdk-version', '24', '--verbose', '--print-certs', str(apk)])
+    return parse_verified_signer_report(report)
 
 def inspected_identity(apk: Path) -> tuple[str,int,str]:
     report=inspect_tool('aapt',['dump','badging',str(apk)])

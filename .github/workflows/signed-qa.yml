@@ -46,6 +46,8 @@ jobs:
     environment: community-signing-qa
     strategy:
       fail-fast: false
+      # Avoid five concurrent cold Gradle dependency downloads from Maven Central.
+      max-parallel: 2
       matrix:
         version_code: [13704, 13705, 13706, 13707, 13708]
     permissions:
@@ -84,7 +86,26 @@ jobs:
           KDE_FORK_STORE_PASSWORD: ${{ secrets.KDE_FORK_STORE_PASSWORD }}
           KDE_FORK_KEY_ALIAS: ${{ secrets.KDE_FORK_KEY_ALIAS }}
           KDE_FORK_KEY_PASSWORD: ${{ secrets.KDE_FORK_KEY_PASSWORD }}
-        run: ./gradlew --no-daemon --console=plain -Pci testReleaseUnitTest lintRelease assembleRelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Retry ONLY transient repository HTTP 429. Any compile/test/lint,
+          # signing, or other failure remains an immediate hard failure.
+          for attempt in 1 2 3; do
+            set +e
+            ./gradlew --no-daemon --console=plain -Pci testReleaseUnitTest lintRelease assembleRelease 2>&1 | tee "$RUNNER_TEMP/kde-qa-gradle.log"
+            result=${PIPESTATUS[0]}
+            set -e
+            if (( result == 0 )); then
+              exit 0
+            fi
+            if (( attempt == 3 )) || ! grep -Eiq 'Received status code 429|HTTP response code: 429|Too Many Requests' "$RUNNER_TEMP/kde-qa-gradle.log"; then
+              echo "KDE_QA_GRADLE_FAILURE rc=$result attempt=$attempt (not bypassed)" >&2
+              exit "$result"
+            fi
+            echo "KDE_QA_MAVEN_429_RETRY attempt=$attempt of 3; build result=$result" >&2
+            sleep $(( attempt * 45 ))
+          done
       - name: Verify signer, APK package/version and create QA-only receipt
         shell: bash
         env:

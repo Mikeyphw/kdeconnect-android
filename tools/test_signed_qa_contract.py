@@ -4,6 +4,9 @@ import sys
 from pathlib import Path
 import tempfile
 import unittest
+import os
+import subprocess
+import textwrap
 from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -62,6 +65,121 @@ class SignedQaVerification(unittest.TestCase):
                                   '--expected-cert',CERT,'--expected-source',SOURCE,'--expected-code','13704']),0)
         self.assertEqual(qa.main(['attest','--apk',str(self.apk),'--metadata',str(md),
                                   '--expected-cert',CERT,'--expected-source',SOURCE,'--expected-code','13704']),2)
+
+class AndroidSignerReportCompatibility(unittest.TestCase):
+    """Signed APK verification must cover both modern SDK-range and legacy rows."""
+    def test_valid_single_signer_legacy_and_sdk_ranges(self):
+        for report in (
+            'Verifies\nNumber of signers: 1\nSigner #1 certificate SHA-256 digest: '+CERT+'\n',
+            'Verifies\nSigner (minSdkVersion=24, maxSdkVersion=32) certificate SHA-256 digest: '+CERT+'\n'
+            'Signer (minSdkVersion=33) certificate SHA-256 digest: '+CERT+'\n',
+            'Signer (minSdkVersion=24, maxSdkVersion=32) certificate SHA-256 digest: '+CERT.upper()+'\n'
+            'Signer (minSdkVersion=33, maxSdkVersion=36) certificate SHA-256 digest: '+CERT+'\n',
+        ):
+            with self.subTest(report=report):
+                self.assertEqual(qa.parse_verified_signer_report(report),CERT)
+
+    def test_rejects_ambiguous_or_missing_certificate(self):
+        for report in (
+            '', 'Verifies\n',
+            'Signer #1 certificate SHA-1 digest: '+CERT[:40]+'\n',
+            'Signer #1 certificate SHA-256 digest: '+CERT[:-1]+'\n',
+            'Signer #1 certificate SHA-256 digest: '+CERT+'\n'
+            'Signer #2 certificate SHA-256 digest: '+'a'*64+'\n',
+            'Signer (minSdkVersion=24, maxSdkVersion=32) certificate SHA-256 digest: '+CERT+'\n'
+            'Signer (minSdkVersion=33) certificate SHA-256 digest: '+'a'*64+'\n',
+            'Number of signers: 2\nSigner #1 certificate SHA-256 digest: '+CERT+'\n',
+            'Signer unexpected certificate SHA-256 digest: '+CERT+'\n',
+            'Signer #1 certificate SHA-256 digest: '+CERT+'\n'
+            'Signer odd-version certificate SHA-256 digest: '+CERT+'\n',
+        ):
+            with self.subTest(report=report), self.assertRaises(qa.Rejected):
+                qa.parse_verified_signer_report(report)
+
+    def test_inspected_signer_requires_real_successful_apksigner_verify(self):
+        report='Signer (minSdkVersion=24, maxSdkVersion=32) certificate SHA-256 digest: '+CERT+'\n'
+        with patch.object(qa,'inspect_tool',return_value=report) as call:
+            self.assertEqual(qa.inspected_signer(Path('/tmp/fake.apk')),CERT)
+            self.assertEqual(call.call_args.args[0], 'apksigner')
+            self.assertIn('verify',call.call_args.args[1])
+            self.assertIn('--min-sdk-version',call.call_args.args[1])
+        with patch.object(qa,'inspect_tool',side_effect=qa.Rejected('Invalid APK signature')):
+            with self.assertRaises(qa.Rejected):qa.inspected_signer(Path('/tmp/fake.apk'))
+
+    def test_production_uses_same_real_signature_verifier(self):
+        workflow=(ROOT/'.github/workflows/community-release.yml').read_text(encoding='utf8')
+        self.assertIn('from tools.signed_qa import inspected_signer',workflow)
+        self.assertIn("inspected_signer(Path('release/kdeconnect-community.apk'))",workflow)
+        self.assertIn('if actual != pinned:',workflow)
+        self.assertNotIn('re.findall(',workflow)
+
+    def test_bounded_maven_429_retries_only(self):
+        workflow=(ROOT/'.github/workflows/signed-qa.yml').read_text(encoding='utf8')
+        required=('max-parallel: 2', 'for attempt in 1 2 3',
+                  'Received status code 429', 'Too Many Requests',
+                  'result=${PIPESTATUS[0]}', 'tee "$RUNNER_TEMP/kde-qa-gradle.log"',
+                  'exit "$result"', 'testReleaseUnitTest lintRelease assembleRelease')
+        for x in required:self.assertIn(x,workflow)
+        self.assertNotIn('continue-on-error:',workflow)
+        self.assertNotIn('|| true',workflow)
+
+class Maven429HostedShellRegression(unittest.TestCase):
+    """Execute the actual hosted bash step with fake Gradle; never waive errors."""
+
+    @staticmethod
+    def shell_step() -> str:
+        workflow=(ROOT/'.github/workflows/signed-qa.yml').read_text(encoding='utf8')
+        step=workflow.split('      - name: Build signed, isolated QA release candidate\n',1)[1]
+        step=step.split('      - name: Verify signer, APK package/version and create QA-only receipt\n',1)[0]
+        body=step.split('        run: |\n',1)[1]
+        return textwrap.dedent(body)
+
+    @staticmethod
+    def execute(scenario: str) -> tuple[int, int, str]:
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            gradlew=root/'gradlew'
+            gradlew.write_text("""#!/usr/bin/env bash
+set -euo pipefail
+counter="$RUNNER_TEMP/attempt-count"
+count=0
+if [[ -s "$counter" ]]; then count=$(cat "$counter"); fi
+count=$((count + 1))
+printf '%s' "$count" > "$counter"
+case "$QA_TEST_SCENARIO" in
+  success) echo 'BUILD SUCCESSFUL'; exit 0;;
+  429-then-success)
+    if ((count == 1)); then echo 'Could not GET ... Received status code 429 from server: Too Many Requests'; exit 1; fi
+    echo 'BUILD SUCCESSFUL'; exit 0;;
+  fail-compile) echo 'Compilation error: Kotlin type mismatch'; exit 7;;
+  persistent-429) echo 'Could not GET ... Received status code 429 from server: Too Many Requests'; exit 1;;
+esac
+exit 99
+""")
+            gradlew.chmod(0o755)
+            binpath=root/'bin';binpath.mkdir()
+            sleeper=binpath/'sleep';sleeper.write_text('#!/bin/sh\nexit 0\n');sleeper.chmod(0o755)
+            env=os.environ.copy()
+            env.update(RUNNER_TEMP=temp, QA_TEST_SCENARIO=scenario,
+                       PATH=str(binpath)+os.pathsep+env.get('PATH',''))
+            result=subprocess.run(['bash','-c',Maven429HostedShellRegression.shell_step()],
+                                  cwd=root,env=env,capture_output=True,text=True,timeout=15)
+            return result.returncode,int((root/'attempt-count').read_text()),result.stdout+result.stderr
+
+    def test_successful_gradle_not_repeated(self):
+        rc,n,_=self.execute('success');self.assertEqual((rc,n),(0,1))
+
+    def test_maven_429_only_retried_and_then_passes(self):
+        rc,n,logs=self.execute('429-then-success')
+        self.assertEqual((rc,n),(0,2));self.assertIn('KDE_QA_MAVEN_429_RETRY',logs)
+
+    def test_compilation_error_never_retried_or_waived(self):
+        rc,n,logs=self.execute('fail-compile')
+        self.assertEqual((rc,n),(7,1));self.assertIn('Compilation error',logs)
+
+    def test_repeated_maven_429_remains_failed(self):
+        rc,n,logs=self.execute('persistent-429')
+        self.assertEqual((rc,n),(1,3));self.assertIn('KDE_QA_GRADLE_FAILURE',logs)
 
 class SignedQaChain(unittest.TestCase):
     def test_require_all_five_same_signer_and_monotonic(self):
