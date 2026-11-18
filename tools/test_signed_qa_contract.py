@@ -312,7 +312,9 @@ class SignedQaSourceContract(unittest.TestCase):
         must('buildConfigField("boolean", "KDE_SIGNED_QA_INSTALL"' in gradle)
         must('storeType = "pkcs12"' in gradle)
         must('if (System.getenv("KDE_FORK_SIGNED_QA") == "1") "true" else "false"' in gradle)
-        must('"-community-qa" else "-community"' in gradle)
+        must('require(forkVersionCode != null && forkVersionCode in 13704..13708)' in gradle)
+        must('versionName = if (signedQaVariant) "1.37.3-community-qa" else "1.37.3"' in gradle)
+        must('versionNameSuffix = if (signedQaVariant) "" else "-community"' in gradle)
         must('if (BuildConfig.KDE_SIGNED_QA_INSTALL)' in updater)
         must('if (uri == null || !BuildConfig.KDE_SIGNED_QA_INSTALL)' in updater)
         must('check(BuildConfig.KDE_SIGNED_QA_INSTALL)' in release)
@@ -349,7 +351,11 @@ class SignedQaSourceContract(unittest.TestCase):
                (0,'environment: community-signing-qa','environment: default'),
                (0,"'Mikeyphw'","'anyone'"),
                (0,'signed_qa.py attest','echo done'),
-               (1,'"-community-qa" else "-community"','"-community" else "-community"'),
+               (1,'versionName = if (signedQaVariant) "1.37.3-community-qa" else "1.37.3"',
+                  'versionName = "1.37.3"'),
+               (1,'forkVersionCode in 13704..13708','forkVersionCode in 13703..13708'),
+               (1,'versionNameSuffix = if (signedQaVariant) "" else "-community"',
+                  'versionNameSuffix = "-community"'),
                (2,'if (BuildConfig.KDE_SIGNED_QA_INSTALL)','if (true)'),
                (3,'verifyApkIdentity(context, partial, identity)','// bypassed identity'),
                (4,'test_signed_qa_contract.py','missing_qa_contract.py')]
@@ -358,7 +364,6 @@ class SignedQaSourceContract(unittest.TestCase):
             altered=files.copy();altered[index]=altered[index].replace(a,b,1)
             with self.subTest(case=(index,a)),self.assertRaises(ValueError):self.inspect(*altered)
 
-if __name__=='__main__':unittest.main()
 
 
 class ModernApksignerSchemeCompatibility(unittest.TestCase):
@@ -414,3 +419,52 @@ class ModernApksignerSchemeCompatibility(unittest.TestCase):
         report='V3.0 Signer: certificate SHA-256 digest: '+CERT+'\n'
         self.assertIn('scheme-v3.0',qa.report_shape(report))
         self.assertNotIn(CERT,qa.report_shape(report))
+
+
+class SignedQaManifestIdentityDiagnostics(unittest.TestCase):
+    """Reject mismatched package, code, or QA name; report only safe metadata."""
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.apk=Path(self.tmp.name)/qa.QA_NAME
+        self.apk.write_bytes(b'A'*2048)
+        self.signer=patch.object(qa,'inspected_signer',return_value=CERT)
+        self.signer.start()
+        self.addCleanup(self.signer.stop)
+
+    def test_canonical_manifest_identity_is_accepted(self):
+        with patch.object(qa,'inspected_identity',return_value=(qa.QA_PACKAGE,13704,qa.QA_VERSION)):
+            result=qa.verify(self.apk,None,CERT,SOURCE,13704)
+        self.assertEqual(result['version_name'],qa.QA_VERSION)
+
+    def test_each_identity_mismatch_still_refused_and_identified(self):
+        rows=[
+            (('org.kde.invalid',13704,qa.QA_VERSION),'package'),
+            ((qa.QA_PACKAGE,13703,qa.QA_VERSION),'versionCode'),
+            ((qa.QA_PACKAGE,13704,'1.37.3-community'),'versionName'),
+        ]
+        for actual,field in rows:
+            with self.subTest(field=field),patch.object(qa,'inspected_identity',return_value=actual):
+                with self.assertRaises(qa.Rejected) as caught:
+                    qa.verify(self.apk,None,CERT,SOURCE,13704)
+                self.assertIn('fields='+field,str(caught.exception))
+                self.assertIn('Wrong QA APK',str(caught.exception))
+
+    def test_untrusted_manifest_text_does_not_escape_to_logs(self):
+        evil='bad\n##[error]fake-runner-command'
+        with patch.object(qa,'inspected_identity',return_value=(qa.QA_PACKAGE,13704,evil)):
+            with self.assertRaises(qa.Rejected) as caught:
+                qa.verify(self.apk,None,CERT,SOURCE,13704)
+        msg=str(caught.exception)
+        self.assertIn('observed_version=<redacted>',msg)
+        self.assertNotIn(evil,msg)
+        self.assertNotIn(CERT,msg)
+
+    def test_release_qa_gradle_config_gates_are_current_and_strict(self):
+        gradle=(ROOT/'build.gradle.kts').read_text(encoding='utf8')
+        self.assertIn('versionName = if (signedQaVariant) "1.37.3-community-qa" else "1.37.3"',gradle)
+        self.assertIn('require(forkVersionCode != null && forkVersionCode in 13704..13708)',gradle)
+        self.assertIn('versionNameSuffix = if (signedQaVariant) "" else "-community"',gradle)
+        self.assertIn('applicationIdSuffix = ".mikey"',gradle)
+
+if __name__=='__main__':unittest.main()

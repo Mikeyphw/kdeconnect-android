@@ -28,6 +28,16 @@ plugins {
 
 val licenseResDir = "$projectDir/build/dependency-license-res"
 
+// The five signed QA candidates require exact metadata; never silently
+// fall back to the production version if the matrix variable is absent.
+val signedQaVariant = System.getenv("KDE_FORK_SIGNED_QA") == "1"
+val forkVersionCode = System.getenv("KDE_FORK_VERSION_CODE")?.toIntOrNull()
+if (signedQaVariant) {
+    require(forkVersionCode != null && forkVersionCode in 13704..13708) {
+        "Signed QA requires an explicit reserved versionCode (13704..13708)"
+    }
+}
+
 kotlin {
     compilerOptions {
         jvmTarget = JvmTarget.JVM_11
@@ -44,8 +54,10 @@ android {
         // Upstream KDE Connect continues to support API 23; this community fork does not.
         minSdk = 24
         targetSdk = 37
-        versionCode = System.getenv("KDE_FORK_VERSION_CODE")?.toIntOrNull() ?: 13703
-        versionName = "1.37.3"
+        versionCode = forkVersionCode ?: 13703
+        // Do not rely on versionNameSuffix to construct QA identity: the
+        // signed APK manifest must exactly match tools/signed_qa.py.
+        versionName = if (signedQaVariant) "1.37.3-community-qa" else "1.37.3"
         // QA capability exists only in explicitly labeled, signed QA variants.
         buildConfigField("boolean", "KDE_SIGNED_QA_INSTALL", if (System.getenv("KDE_FORK_SIGNED_QA") == "1") "true" else "false")
         proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
@@ -109,7 +121,8 @@ android {
         getByName("release") {
             // A distinct package prevents overwriting the official F-Droid/Play build.
             applicationIdSuffix = ".mikey"
-            versionNameSuffix = if (System.getenv("KDE_FORK_SIGNED_QA") == "1") "-community-qa" else "-community"
+            // QA already has its full name in defaultConfig; no double suffix.
+            versionNameSuffix = if (signedQaVariant) "" else "-community"
             if (!System.getenv("KDE_FORK_KEYSTORE").isNullOrBlank()) {
                 signingConfig = signingConfigs.getByName("communityRelease")
             }

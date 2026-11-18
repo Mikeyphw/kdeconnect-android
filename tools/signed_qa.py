@@ -232,7 +232,22 @@ def verify(apk: Path, meta: dict[str,Any] | None, cert: str, source: str, code: 
     signer=inspected_signer(apk)
     must(signer == cert.lower(), 'APK signer does not match independent trust pin')
     package,ver,vername=inspected_identity(apk)
-    must((package,ver,vername)==(QA_PACKAGE,code,QA_VERSION),'Wrong QA APK package/version/name')
+    mismatches=[]
+    if package != QA_PACKAGE:
+        mismatches.append('package')
+    if ver != code:
+        mismatches.append('versionCode')
+    if vername != QA_VERSION:
+        mismatches.append('versionName')
+    # APK manifest strings are untrusted. Never echo raw control characters,
+    # signing keys, certificate data or unbounded text into runner logs.
+    def diagnostic(value: str) -> str:
+        return value if len(value) <= 90 and re.fullmatch(r'[A-Za-z0-9_.+-]+', value) else '<redacted>'
+    must(not mismatches,
+         'Wrong QA APK package/version/name; fields='+','.join(mismatches)+
+         '; observed_package='+diagnostic(package)+
+         '; observed_code='+str(ver)+
+         '; observed_version='+diagnostic(vername))
     expected={
         'schema':'kdeconnect.signed-qa.v1',
         'qualification_only':True,
