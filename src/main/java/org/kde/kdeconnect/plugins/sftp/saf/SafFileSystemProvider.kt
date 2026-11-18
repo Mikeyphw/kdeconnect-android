@@ -5,6 +5,7 @@
  */
 package org.kde.kdeconnect.plugins.sftp.saf
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.net.Uri
 import android.os.Build
@@ -374,6 +375,9 @@ class SafFileSystemProvider(
         }
     }
 
+    // FileAttributeView is supplied by coreLibraryDesugaring(desugar_jdk_libs_nio)
+    // for minSdk 24. Android lint checks the platform introduction (API26) only.
+    @SuppressLint("NewApi")
     override fun <V : FileAttributeView> getFileAttributeView(
         path: Path,
         type: Class<V>,

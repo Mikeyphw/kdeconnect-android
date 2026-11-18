@@ -28,6 +28,16 @@ plugins {
 
 val licenseResDir = "$projectDir/build/dependency-license-res"
 
+// The five signed QA candidates require exact metadata; never silently
+// fall back to the production version if the matrix variable is absent.
+val signedQaVariant = System.getenv("KDE_FORK_SIGNED_QA") == "1"
+val forkVersionCode = System.getenv("KDE_FORK_VERSION_CODE")?.toIntOrNull()
+if (signedQaVariant) {
+    require(forkVersionCode != null && forkVersionCode in 13704..13708) {
+        "Signed QA requires an explicit reserved versionCode (13704..13708)"
+    }
+}
+
 kotlin {
     compilerOptions {
         jvmTarget = JvmTarget.JVM_11
@@ -39,13 +49,22 @@ android {
     compileSdk = 37
     defaultConfig {
         applicationId = "org.kde.kdeconnect_tp"
-        minSdk = 23
+        // Shizuku API/provider 13.1.5 requires API 24 (verified by hosted manifest merger).
+        // Do not bypass the library contract using tools:overrideLibrary.
+        // Upstream KDE Connect continues to support API 23; this community fork does not.
+        minSdk = 24
         targetSdk = 37
-        versionCode = 13703
-        versionName = "1.37.3"
+        versionCode = forkVersionCode ?: 13703
+        // Do not rely on versionNameSuffix to construct QA identity: the
+        // signed APK manifest must exactly match tools/signed_qa.py.
+        versionName = if (signedQaVariant) "1.37.3-community-qa" else "1.37.3"
+        // QA capability exists only in explicitly labeled, signed QA variants.
+        buildConfigField("boolean", "KDE_SIGNED_QA_INSTALL", if (System.getenv("KDE_FORK_SIGNED_QA") == "1") "true" else "false")
         proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
     }
     buildFeatures {
+        // AGP 9+ disables AIDL by default; IPrivilegedInstaller must be generated.
+        aidl = true
         viewBinding = true
         compose = true
         buildConfig = true
@@ -73,6 +92,17 @@ android {
         }
     }
     signingConfigs {
+        create("communityRelease") {
+            val path = System.getenv("KDE_FORK_KEYSTORE")
+            if (!path.isNullOrBlank()) {
+                storeFile = file(path)
+                // Existing private signing material is a PKCS#12 (.p12) store.
+                storeType = "pkcs12"
+                storePassword = System.getenv("KDE_FORK_STORE_PASSWORD")
+                keyAlias = System.getenv("KDE_FORK_KEY_ALIAS")
+                keyPassword = System.getenv("KDE_FORK_KEY_PASSWORD")
+            }
+        }
         getByName("debug") {
             storeFile = file("debug.keystore")
             storePassword = "android"
@@ -89,12 +119,21 @@ android {
             versionNameSuffix = "-debug"
         }
         getByName("release") {
+            // A distinct package prevents overwriting the official F-Droid/Play build.
+            applicationIdSuffix = ".mikey"
+            // QA already has its full name in defaultConfig; no double suffix.
+            versionNameSuffix = if (signedQaVariant) "" else "-community"
+            if (!System.getenv("KDE_FORK_KEYSTORE").isNullOrBlank()) {
+                signingConfig = signingConfigs.getByName("communityRelease")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
         }
     }
     lint {
-        abortOnError = false
+        // Source-bound localization backlog only; all new lint findings remain errors.
+        baseline = file("lint-baseline.xml")
+        abortOnError = true
         checkReleaseBuilds = false
     }
 }
@@ -274,6 +313,8 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.preference.ktx)
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
     implementation(libs.androidx.recyclerview)
     implementation(libs.androidx.swiperefreshlayout)
     implementation(libs.androidx.documentfile)

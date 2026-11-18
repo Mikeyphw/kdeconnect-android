@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "repository": "Mikeyphw/kdeconnect-android",
+  "base_branch": "master",
+  "event": "pull_request",
+  "release_qualification": "separate",
+  "required_workflows": [
+    {
+      "name": "Android community build",
+      "workflow_id": 420422186
+    }
+  ]
+}

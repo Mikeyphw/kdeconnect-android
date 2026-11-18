@@ -7,6 +7,7 @@ SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted
 -->
 
 <paths>
+    <cache-path name="verified_updates" path="updates/" />
     <external-path
         name="external_files"
         path="." />

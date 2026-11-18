@@ -23,15 +23,19 @@ import android.os.IBinder
 import android.util.Log
 import androidx.annotation.MainThread
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.core.content.getSystemService
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
+import androidx.preference.PreferenceManager
 import org.kde.kdeconnect.backends.BaseLinkProvider
 import org.kde.kdeconnect.backends.BaseLinkProvider.ConnectionReceiver
 import org.kde.kdeconnect.backends.bluetooth.BluetoothLinkProvider
 import org.kde.kdeconnect.backends.lan.LanLinkProvider
 import org.kde.kdeconnect.helpers.NotificationHelper
+import org.kde.kdeconnect.helpers.ThreadHelper
 import org.kde.kdeconnect.plugins.clipboard.ClipboardFloatingActivity
 import org.kde.kdeconnect.plugins.clipboard.ClipboardPlugin
 import org.kde.kdeconnect.plugins.runcommand.RunCommandActivity
@@ -258,10 +262,32 @@ class BackgroundService : Service() {
         super.onDestroy()
     }
 
+    // Adapted from jendermine MR !790, source commit 1ded6bc1a2fcd9a5191be24afe6d917843446123.
+    private fun stopByUser() {
+        Log.i(TAG, "Stopped by user")
+        setStoppedByUser(this, true)
+        val devices = applicationInstance.devices.values.toList()
+        ThreadHelper.runOnNewThread { devices.forEach(Device::disconnect) }
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
     override fun onBind(intent: Intent): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand")
+        if (isStoppedByUser(this)) {
+            // Foreground start requests may need a foreground transition before shutdown.
+            if (NotificationHelper.isPersistentNotificationEnabled(this)) {
+                try {
+                    startForeground(FOREGROUND_NOTIFICATION_ID, createForegroundNotification())
+                } catch (e: IllegalStateException) {
+                    Log.w(TAG, "Couldn't startForeground", e)
+                }
+            }
+            stopByUser()
+            return START_NOT_STICKY
+        }
         if (NotificationHelper.isPersistentNotificationEnabled(this)) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 try {
@@ -286,6 +312,15 @@ class BackgroundService : Service() {
 
         private const val UPDATE_IMMUTABLE_FLAGS = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         private const val FOREGROUND_NOTIFICATION_ID = 1
+
+        private const val KEY_STOPPED_BY_USER = "backgroundServiceStoppedByUser"
+
+        fun isStoppedByUser(context: Context): Boolean =
+            PreferenceManager.getDefaultSharedPreferences(context).getBoolean(KEY_STOPPED_BY_USER, false)
+
+        private fun setStoppedByUser(context: Context, stopped: Boolean) {
+            PreferenceManager.getDefaultSharedPreferences(context).edit { putBoolean(KEY_STOPPED_BY_USER, stopped) }
+        }
 
         var instance: BackgroundService? = null
             private set
@@ -323,12 +358,14 @@ class BackgroundService : Service() {
 
         fun Start(context: Context) {
             Log.d(TAG, "Start")
+            setStoppedByUser(context, false)
             val intent = Intent(context, BackgroundService::class.java)
             startService(context, intent)
         }
 
         fun ForceRefreshConnections(context: Context) {
             Log.d(TAG, "ForceRefreshConnections")
+            setStoppedByUser(context, false)
             val service = instance
             if (initialized && service != null) {
                 service.onNetworkChange(null)
@@ -337,6 +374,34 @@ class BackgroundService : Service() {
             val intent = Intent(context, BackgroundService::class.java)
             intent.putExtra("refresh", true)
             startService(context, intent)
+        }
+
+        fun StartAutomatically(context: Context) {
+            if (isStoppedByUser(context)) {
+                Log.d(TAG, "StartAutomatically skipped: stopped by user")
+                return
+            }
+            startService(context, Intent(context, BackgroundService::class.java))
+        }
+
+        fun RefreshAutomatically(context: Context) {
+            if (isStoppedByUser(context)) {
+                Log.d(TAG, "RefreshAutomatically skipped: stopped by user")
+                return
+            }
+            val service = instance
+            if (initialized && service != null) {
+                service.onNetworkChange(null)
+                return
+            }
+            val intent = Intent(context, BackgroundService::class.java)
+            intent.putExtra("refresh", true)
+            startService(context, intent)
+        }
+
+        fun Stop(context: Context) {
+            setStoppedByUser(context, true)
+            instance?.stopByUser()
         }
     }
 }
