@@ -83,6 +83,13 @@ SIGNER_SDK_RANGE = re.compile(
 SIGNER_NUMBER = re.compile(
     r'^#(?P<index>[1-9]\d*)(?:\s+(?P<sdk>\(minSdkVersion=\d+'
     r'(?:,\s*maxSdkVersion=\d+)?\)))?$')
+# Android build-tools 37+ can report active scheme signers as
+# 'V3.0 Signer: certificate SHA-256 digest: ...' instead of 'Signer #1 ...'.
+# Accept only these explicit scheme labels, never arbitrary certificate text.
+SCHEME_SIGNER_SHA256_ROW = re.compile(
+    r'^V(?P<scheme>2(?:\.0)?|3\.0|3\.1|3\.2) Signer:'
+    r'(?: (?P<sdk>\(minSdkVersion=\d+(?:,\s*maxSdkVersion=\d+)?\)))?'
+    r' certificate SHA-256 digest:\s*(?P<digest>\S(?:.*\S)?)\s*$')
 SIGNER_COUNT = re.compile(r'^Number of signers:\s*(\S+)\s*$', re.MULTILINE)
 HEX_COLON_SHA256 = re.compile(r'^(?:[a-fA-F0-9]{2}:){31}[a-fA-F0-9]{2}$')
 PEM_CERTIFICATE = re.compile(
@@ -94,18 +101,23 @@ PEM_CERTIFICATE = re.compile(
 def report_shape(report: str) -> str:
     """Bounded diagnostics that cannot expose cert bytes, DN or PEM data."""
     lines=report.splitlines()
-    candidates=[line for line in lines
-                if line.startswith('Signer ') and 'certificate SHA-256' in line]
+    candidates=[line for line in lines if 'certificate SHA-256' in line
+                and (line.startswith('Signer ') or
+                     re.match(r'^V[0-9.]+ Signer', line))]
     kinds=[];widths=[]
     for line in candidates[:12]:
-        row=SIGNER_SHA256_ROW.fullmatch(line)
-        if row is None:
+        legacy=SIGNER_SHA256_ROW.fullmatch(line)
+        scheme=SCHEME_SIGNER_SHA256_ROW.fullmatch(line) if legacy is None else None
+        if legacy is None and scheme is None:
             kinds.append('unparsed');widths.append(0)
-        else:
-            label=row.group('label')
+        elif legacy is not None:
+            label=legacy.group('label')
             kinds.append('numbered' if label.startswith('#') else
                          'sdk-range' if label.startswith('(') else 'other')
-            widths.append(min(len(row.group('digest')),256))
+            widths.append(min(len(legacy.group('digest')),256))
+        else:
+            kinds.append('scheme-v'+scheme.group('scheme'))
+            widths.append(min(len(scheme.group('digest')),256))
     return ('lines='+str(min(len(lines),9999))+
             ' sha256_rows='+str(len(candidates))+
             ' label_kinds='+','.join(kinds)+
@@ -123,22 +135,34 @@ def require_single_signer(report: str) -> None:
 
 
 def parse_verified_signer_report(report: str) -> str:
-    """Parse signer digests from an already successful apksigner verification."""
+    """Parse only recognized signer rows from successful apksigner verify."""
     require_single_signer(report)
     candidates=[line for line in report.splitlines()
-                if line.startswith('Signer ') and 'certificate SHA-256' in line]
-    must(bool(candidates),'Missing apksigner SHA-256 certificate output')
+                if 'certificate SHA-256' in line and
+                (line.startswith('Signer ') or re.match(r'^V[0-9.]+ Signer', line))]
+    must(bool(candidates), 'Missing apksigner SHA-256 certificate output')
     digests=[]
+    seen_labels=set()
     for line in candidates:
         row=SIGNER_SHA256_ROW.fullmatch(line)
-        must(row is not None,'Unrecognized apksigner SHA-256 signer row')
-        label=row.group('label')
-        match=SIGNER_NUMBER.fullmatch(label)
-        if match is not None:
-            must(int(match.group('index'))==1,'Multiple APK signers detected')
+        if row is not None:
+            label=row.group('label')
+            match=SIGNER_NUMBER.fullmatch(label)
+            if match is not None:
+                must(int(match.group('index'))==1, 'Multiple APK signers detected')
+            else:
+                must(SIGNER_SDK_RANGE.fullmatch(label) is not None,
+                     'Unrecognized apksigner signer label')
+            identity='legacy:'+label
         else:
-            must(SIGNER_SDK_RANGE.fullmatch(label) is not None,
-                 'Unrecognized apksigner signer label')
+            row=SCHEME_SIGNER_SHA256_ROW.fullmatch(line)
+            must(row is not None, 'Unrecognized apksigner SHA-256 signer row')
+            sdk=row.group('sdk')
+            must(sdk is None or SIGNER_SDK_RANGE.fullmatch(sdk) is not None,
+                 'Invalid apksigner scheme SDK range')
+            identity='v'+row.group('scheme')+':'+(sdk or '')
+        must(identity not in seen_labels, 'Duplicate APK signer certificate row')
+        seen_labels.add(identity)
         digest=row.group('digest')
         if HEX_COLON_SHA256.fullmatch(digest):
             digest=digest.replace(':','')
@@ -148,7 +172,6 @@ def parse_verified_signer_report(report: str) -> str:
     must(len(set(digests))==1,
          'Multiple distinct signing certificates detected across APK SDK ranges')
     return digests[0]
-
 
 def parse_verified_pem_report(report: str) -> str:
     """Hash the sole verified apksigner PEM, not an unverified APK entry."""

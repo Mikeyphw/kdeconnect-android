@@ -359,3 +359,58 @@ class SignedQaSourceContract(unittest.TestCase):
             with self.subTest(case=(index,a)),self.assertRaises(ValueError):self.inspect(*altered)
 
 if __name__=='__main__':unittest.main()
+
+
+class ModernApksignerSchemeCompatibility(unittest.TestCase):
+    """Build-tools 37 scheme-prefixed certificate report; still fail closed."""
+
+    def test_verified_v3_scheme_rows_match_original_certificate_pin(self):
+        for row in (
+            'V3.0 Signer: certificate SHA-256 digest: '+CERT,
+            'V3.0 Signer: (minSdkVersion=24, maxSdkVersion=32) certificate SHA-256 digest: '+CERT,
+            'V3.1 Signer: (minSdkVersion=33, maxSdkVersion=36) certificate SHA-256 digest: '+CERT,
+            'V2.0 Signer: certificate SHA-256 digest: '+CERT,
+            'V2 Signer: certificate SHA-256 digest: '+CERT,
+            'V3.2 Signer: certificate SHA-256 digest: '+CERT,
+        ):
+            report='Verifies\nNumber of signers: 1\n'+row+'\n'
+            with self.subTest(row=row[:15]):
+                self.assertEqual(qa.parse_verified_signer_report(report),CERT)
+                self.assertIn('sha256_rows=1',qa.report_shape(report))
+
+    def test_real_verifier_path_uses_only_successful_apksigner_verify(self):
+        report=('Verifies\nNumber of signers: 1\n'
+                'V3.0 Signer: certificate SHA-256 digest: '+CERT+'\n')
+        with patch.object(qa,'inspect_tool',return_value=report) as call:
+            self.assertEqual(qa.inspected_signer(Path('/irrelevant.apk')),CERT)
+            self.assertEqual(call.call_count,1)
+            self.assertIn('verify',call.call_args.args[1])
+        with patch.object(qa,'inspect_tool',side_effect=qa.Rejected('bad signature')):
+            with self.assertRaises(qa.Rejected):
+                qa.inspected_signer(Path('/irrelevant.apk'))
+
+    def test_conflicting_or_malformed_scheme_signers_refused_without_fallback(self):
+        base='Verifies\nNumber of signers: 1\n'
+        good='V3.0 Signer: certificate SHA-256 digest: '+CERT+'\n'
+        bad='V3.1 Signer: certificate SHA-256 digest: '+'a'*64+'\n'
+        inputs=(
+            base+good+bad,
+            'Verifies\nNumber of signers: 2\n'+good,
+            base+'V3.0 Signer #2 certificate SHA-256 digest: '+CERT+'\n',
+            base+'V4.0 Signer: certificate SHA-256 digest: '+CERT+'\n',
+            base+'V3.0 Signer: certificate SHA-256 digest: '+CERT[:-1]+'\n',
+            base+good+good,
+            base+'V3.1 Signer: (minSdkVersion=abc) certificate SHA-256 digest: '+CERT+'\n',
+        )
+        for report in inputs:
+            with self.subTest(shape=qa.report_shape(report)), self.assertRaises(qa.Rejected):
+                qa.parse_verified_signer_report(report)
+            with patch.object(qa,'inspect_tool',return_value=report) as call:
+                with self.assertRaises(qa.Rejected):
+                    qa.inspected_signer(Path('/irrelevant.apk'))
+                self.assertEqual(call.call_count,1)
+
+    def test_scheme_report_diagnostics_dont_disclose_fingerprint(self):
+        report='V3.0 Signer: certificate SHA-256 digest: '+CERT+'\n'
+        self.assertIn('scheme-v3.0',qa.report_shape(report))
+        self.assertNotIn(CERT,qa.report_shape(report))
