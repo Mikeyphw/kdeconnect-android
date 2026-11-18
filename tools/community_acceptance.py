@@ -150,8 +150,11 @@ def validated_manifest(meta: dict, expected_source: str, expected_tag: str) -> N
 
 def parse_badging(report: str) -> tuple[str, int, str]:
     row = next((line for line in report.splitlines() if line.startswith("package: ")), "")
-    values = dict(re.findall(r"(name|versionCode|versionName)='([^']*)'", row))
-    if set(values) != {"name", "versionCode", "versionName"}:
+    # aapt may append compileSdkVersionCodename and platformBuildVersionName;
+    # partial suffix matches are unsafe for independently verified package IDs.
+    fields = re.findall(r"(?:^|\s)(name|versionCode|versionName)='([^']*)'", row)
+    values = dict(fields)
+    if len(fields) != 3 or set(values) != {"name", "versionCode", "versionName"}:
         fail("Cannot independently parse APK package identity")
     try:
         code = int(values["versionCode"])

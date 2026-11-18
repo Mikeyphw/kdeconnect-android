@@ -213,8 +213,12 @@ def inspected_signer(apk: Path) -> str:
 def inspected_identity(apk: Path) -> tuple[str,int,str]:
     report=inspect_tool('aapt',['dump','badging',str(apk)])
     row=next((s for s in report.splitlines() if s.startswith('package: ')),'')
-    info=dict(re.findall(r"(name|versionCode|versionName)='([^']*)'",row))
-    must(set(info)=={'name','versionCode','versionName'},'Bad APK badging')
+    # aapt adds compileSdkVersionCodename='17' and platformBuildVersionName.
+    # Those are NOT the package name or versionName. Match token boundaries.
+    fields=re.findall(r"(?:^|\s)(name|versionCode|versionName)='([^']*)'",row)
+    info=dict(fields)
+    must(len(fields)==3 and set(info)=={'name','versionCode','versionName'},
+         'Bad or ambiguous APK badging')
     try:
         code=int(info['versionCode'])
     except ValueError as e:

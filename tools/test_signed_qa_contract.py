@@ -211,7 +211,7 @@ class AndroidSignerReportCompatibility(unittest.TestCase):
 
     def test_bounded_maven_429_retries_only(self):
         workflow=(ROOT/'.github/workflows/signed-qa.yml').read_text(encoding='utf8')
-        required=('max-parallel: 2', 'for attempt in 1 2 3',
+        required=('max-parallel: 1', 'for attempt in 1 2 3 4 5; do',
                   'Received status code 429', 'Too Many Requests',
                   'result=${PIPESTATUS[0]}', 'tee "$RUNNER_TEMP/kde-qa-gradle.log"',
                   'exit "$result"', 'testReleaseUnitTest lintRelease assembleRelease')
@@ -275,7 +275,7 @@ exit 99
 
     def test_repeated_maven_429_remains_failed(self):
         rc,n,logs=self.execute('persistent-429')
-        self.assertEqual((rc,n),(1,3));self.assertIn('KDE_QA_GRADLE_FAILURE',logs)
+        self.assertEqual((rc,n),(1,5));self.assertIn('KDE_QA_GRADLE_FAILURE',logs);self.assertIn('attempt=5',logs)
 
 class SignedQaChain(unittest.TestCase):
     def test_require_all_five_same_signer_and_monotonic(self):
@@ -466,5 +466,50 @@ class SignedQaManifestIdentityDiagnostics(unittest.TestCase):
         self.assertIn('require(forkVersionCode != null && forkVersionCode in 13704..13708)',gradle)
         self.assertIn('versionNameSuffix = if (signedQaVariant) "" else "-community"',gradle)
         self.assertIn('applicationIdSuffix = ".mikey"',gradle)
+
+
+
+class AaptPackageIdentityTokenBoundaryTests(unittest.TestCase):
+    # Regression for aapt compileSdkVersionCodename='17' overwriting name.
+
+    def test_realistic_aapt_report_preserves_package_and_qa_identity(self):
+        row=("package: name='org.kde.kdeconnect_tp.mikey' "
+             "versionCode='13704' versionName='1.37.3-community-qa' "
+             "platformBuildVersionName='17' platformBuildVersionCode='37' "
+             "compileSdkVersion='37' compileSdkVersionCodename='17'\n")
+        with patch.object(qa,'inspect_tool',return_value=row) as tool:
+            self.assertEqual(qa.inspected_identity(Path('/unused.apk')),
+                             (qa.QA_PACKAGE,13704,qa.QA_VERSION))
+            self.assertEqual(tool.call_args.args[0], 'aapt')
+
+    def test_extra_package_or_version_tokens_fail_closed(self):
+        base=("package: name='org.kde.kdeconnect_tp.mikey' "
+              "versionCode='13704' versionName='1.37.3-community-qa'")
+        for suffix in (" name='org.kde.injected'", " versionCode='13708'",
+                       " versionName='1.37.3-community'", " name=''"):
+            with self.subTest(suffix=suffix), patch.object(qa,'inspect_tool',return_value=base+suffix):
+                with self.assertRaises(qa.Rejected):
+                    qa.inspected_identity(Path('/unused.apk'))
+
+    def test_malformed_or_missing_required_fields_are_rejected(self):
+        rows=("package: versionCode='13704' versionName='1.37.3-community-qa'",
+              "package: name='org.kde.kdeconnect_tp.mikey' versionCode='invalid' versionName='1.37.3-community-qa'",
+              "package: name='org.kde.kdeconnect_tp.mikey' versionCode='13704' compileSdkVersionCodename='17'")
+        for report in rows:
+            with self.subTest(report=report), patch.object(qa,'inspect_tool',return_value=report):
+                with self.assertRaises(qa.Rejected):
+                    qa.inspected_identity(Path('/unused.apk'))
+
+    def test_qa_workflow_keeps_bounded_rate_limit_retries(self):
+        workflow=(ROOT/'.github/workflows/signed-qa.yml').read_text(encoding='utf-8')
+        self.assertIn('max-parallel: 1',workflow)
+        self.assertIn('for attempt in 1 2 3 4 5; do',workflow)
+        self.assertIn('if (( attempt == 5 )) || ! grep -Eiq',workflow)
+        self.assertIn('KDE_QA_MAVEN_429_RETRY attempt=$attempt of 5;',workflow)
+        self.assertNotIn('KDE_QA_MAVEN_429_RETRY attempt=$attempt of 3;',workflow)
+        self.assertIn('Too Many Requests',workflow)
+        self.assertIn('KDE_QA_GRADLE_FAILURE',workflow)
+        self.assertIn('testReleaseUnitTest lintRelease assembleRelease',workflow)
+        self.assertNotIn('continue-on-error:',workflow)
 
 if __name__=='__main__':unittest.main()

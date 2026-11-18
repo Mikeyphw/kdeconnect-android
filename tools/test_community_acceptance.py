@@ -320,5 +320,35 @@ class RepositorySafetyContracts(unittest.TestCase):
             self.assertNotIn(field,source)
 
 
+
+
+class ExactReleaseBadgingTokenBoundaryTests(unittest.TestCase):
+    # The independent release verifier cannot consume a suffix of another key.
+    def test_realistic_aapt_package_row(self):
+        report=("package: name='org.kde.kdeconnect_tp.mikey' "
+                "versionCode='137040' versionName='1.37.3-community' "
+                "platformBuildVersionName='17' platformBuildVersionCode='37' "
+                "compileSdkVersion='37' compileSdkVersionCodename='17'\n")
+        self.assertEqual(qa.parse_badging(report),
+                         (qa.PACKAGE_RELEASE,137040,'1.37.3-community'))
+
+    def test_duplicated_or_missing_key_is_not_accepted(self):
+        base=("package: name='org.kde.kdeconnect_tp.mikey' "
+              "versionCode='137040' versionName='1.37.3-community'")
+        for report in (base+" name='fake'",base+" versionName='fake'",
+                       base+" versionCode='137041'",
+                       "package: versionCode='137040' versionName='1.37.3-community'",
+                       base.replace("versionCode='137040'", "versionCode='NaN'")):
+            with self.subTest(report=report),self.assertRaises(ValueError):
+                qa.parse_badging(report)
+
+    def test_signed_release_verification_with_full_aapt_metadata(self):
+        case=SignedReleaseVerificationTests('test_good_signed_release_checked_offline')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.badging = case.badging.rstrip('\n') + " compileSdkVersion='37' compileSdkVersionCodename='17'\n"
+        receipt=case.verify()
+        self.assertEqual(receipt['package_name'],qa.PACKAGE_RELEASE)
+
 if __name__ == '__main__':
     unittest.main()
