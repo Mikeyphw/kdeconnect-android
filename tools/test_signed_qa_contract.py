@@ -142,6 +142,56 @@ class AndroidSignerReportCompatibility(unittest.TestCase):
             with self.subTest(report=report), self.assertRaises(qa.Rejected):
                 qa.parse_verified_signer_report(report)
 
+    def test_fallback_uses_verified_pem_certificate(self):
+        import base64, hashlib
+        der=b'\x30\x12' + b'X'*18
+        pem='-----BEGIN CERTIFICATE-----\n'+base64.b64encode(der).decode()+'\n-----END CERTIFICATE-----\n'
+        signer=hashlib.sha256(der).hexdigest()
+        with patch.object(qa,'inspect_tool',side_effect=['Verifies\n','Verifies\n'+pem]) as tool:
+            self.assertEqual(qa.inspected_signer(Path('/tmp/qa.apk')),signer)
+            self.assertEqual(tool.call_count,2)
+            self.assertIn('--print-certs',tool.call_args_list[0].args[1])
+            self.assertIn('--print-certs-pem',tool.call_args_list[1].args[1])
+
+    def test_fallback_requires_exactly_one_certificate(self):
+        import base64
+        der=b'\x30\x12' + b'X'*18
+        pem='-----BEGIN CERTIFICATE-----\n'+base64.b64encode(der).decode()+'\n-----END CERTIFICATE-----\n'
+        for report in ('',pem+pem,'Number of signers: 2\n'+pem,
+                       'Signer #2 certificate DN: private\n'+pem,
+                       '-----BEGIN CERTIFICATE-----\ninvalid!\n-----END CERTIFICATE-----\n'):
+            with self.subTest(length=len(report)),self.assertRaises(qa.Rejected):
+                qa.parse_verified_pem_report(report)
+
+    def test_malformed_digest_never_falls_back_to_pem(self):
+        with patch.object(qa,'inspect_tool',return_value='Signer #1 certificate SHA-256 digest: BAD\n') as tool:
+            with self.assertRaises(qa.Rejected):
+                qa.inspected_signer(Path('/tmp/qa.apk'))
+            self.assertEqual(tool.call_count,1)
+
+    def test_apksigner_stream_merge_and_failure_refusal(self):
+        from unittest.mock import Mock
+        completed=Mock(returncode=0,stdout='Verifies\n',stderr='Signer #1 certificate SHA-256 digest: '+CERT+'\n')
+        with patch('shutil.which',return_value='/fake/apksigner'), \
+             patch.object(qa.subprocess,'run',return_value=completed):
+            with patch.dict(qa.os.environ,{'ANDROID_HOME':'/nonexistent','ANDROID_SDK_ROOT':'/nonexistent'}):
+                actual=qa.inspect_tool('apksigner',['verify','--print-certs','/fake.apk'])
+            self.assertEqual(qa.parse_verified_signer_report(actual),CERT)
+        completed.returncode=2
+        with patch('shutil.which',return_value='/fake/apksigner'), \
+             patch.object(qa.subprocess,'run',return_value=completed):
+            with patch.dict(qa.os.environ,{'ANDROID_HOME':'/nonexistent','ANDROID_SDK_ROOT':'/nonexistent'}):
+                with self.assertRaises(qa.Rejected):
+                    qa.inspect_tool('apksigner',['verify','/fake.apk'])
+
+    def test_fallback_error_does_not_disclose_pem_or_dn(self):
+        secret='Private signing DN secret'
+        report='Signer #2 certificate DN: '+secret+'\n'
+        with patch.object(qa,'inspect_tool',return_value=report):
+            with self.assertRaises(qa.Rejected) as caught:
+                qa.inspected_signer(Path('/tmp/qa.apk'))
+        self.assertNotIn(secret,str(caught.exception))
+
     def test_inspected_signer_requires_real_successful_apksigner_verify(self):
         report='Signer (minSdkVersion=24, maxSdkVersion=32) certificate SHA-256 digest: '+CERT+'\n'
         with patch.object(qa,'inspect_tool',return_value=report) as call:

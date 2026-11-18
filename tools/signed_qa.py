@@ -32,19 +32,38 @@ def must(condition: bool, detail: str) -> None:
         raise Rejected(detail)
 
 def inspect_tool(tool: str, args: list[str]) -> str:
+    """Use an installed SDK build-tool and retain both apksigner output streams.
+
+    A zero exit code from the actual apksigner verifier is mandatory. No path
+    ever substitutes keytool, APK manifest metadata, or a plain unzip check.
+    """
     from shutil import which
-    path = which(tool)
-    if path is None:
-        builds = Path(os.getenv('ANDROID_HOME') or os.getenv('ANDROID_SDK_ROOT') or '/nonexistent', 'build-tools')
-        candidates = [p for p in builds.glob('*/'+tool) if p.is_file()]
+    path = None
+    sdk = os.getenv('ANDROID_HOME') or os.getenv('ANDROID_SDK_ROOT')
+    if sdk:
+        root = Path(sdk, 'build-tools')
+        candidates = [p for p in root.glob('*/'+tool) if p.is_file()]
+        def version_key(p: Path) -> tuple[int, ...]:
+            parts = re.findall(r'\d+', p.parent.name)
+            return tuple(map(int, parts)) if parts else (0,)
         if candidates:
-            path = str(sorted(candidates, reverse=True)[0])
+            path = str(max(candidates, key=version_key))
+    if path is None:
+        path = which(tool)
     must(bool(path), f'{tool} unavailable')
     try:
-        cp = subprocess.run([path,*args],capture_output=True,text=True,timeout=90,check=False)
-    except (OSError,subprocess.TimeoutExpired) as e:
-        raise Rejected(f'{tool} execution failed: {type(e).__name__}') from e
-    must(cp.returncode == 0, f'{tool} failed: {(cp.stderr or cp.stdout)[-400:]}')
+        cp = subprocess.run([path, *args], capture_output=True, text=True,
+                            timeout=90, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Rejected(f'{tool} execution failed: {type(exc).__name__}') from exc
+    if tool == 'apksigner':
+        # Android build-tools and wrapper versions may choose different streams.
+        combined = (cp.stdout or '') + '\n' + (cp.stderr or '')
+        must(cp.returncode == 0,
+             f'apksigner verification failed (exit={cp.returncode}); '
+             f'apksigner_report_shape={report_shape(combined)}')
+        return combined
+    must(cp.returncode == 0, f'{tool} failed (exit={cp.returncode})')
     return cp.stdout
 
 def apk_hash(apk: Path) -> str:
@@ -54,9 +73,8 @@ def apk_hash(apk: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-# Android build-tools have used both numbered signer labels and SDK-range
-# labels. Parse only verified apksigner rows, never an untrusted manifest or
-# keytool fallback. Any unrecognized SHA-256 signer row fails closed.
+# Android build-tools may label a signer by index or by supported SDK range.
+# Accept only a verified single signing identity, never manifest/keytool output.
 SIGNER_SHA256_ROW = re.compile(
     r'^Signer\s+(?P<label>.+?)\s+certificate SHA-256 digest:\s*'
     r'(?P<digest>\S(?:.*\S)?)\s*$', re.MULTILINE)
@@ -67,80 +85,107 @@ SIGNER_NUMBER = re.compile(
     r'(?:,\s*maxSdkVersion=\d+)?\)))?$')
 SIGNER_COUNT = re.compile(r'^Number of signers:\s*(\S+)\s*$', re.MULTILINE)
 HEX_COLON_SHA256 = re.compile(r'^(?:[a-fA-F0-9]{2}:){31}[a-fA-F0-9]{2}$')
+PEM_CERTIFICATE = re.compile(
+    r'(?m)^-----BEGIN CERTIFICATE-----\r?\n'
+    r'(?:[A-Za-z0-9+/=]+\r?\n)+'
+    r'-----END CERTIFICATE-----(?:\r?\n|$)')
 
 
 def report_shape(report: str) -> str:
-    """Bounded structural diagnostics without certificate bytes, DNs or secrets."""
-    lines = report.splitlines()
-    candidates = [line for line in lines
-                  if line.startswith('Signer ') and 'certificate SHA-256' in line]
-    kinds: list[str] = []
-    widths: list[int] = []
+    """Bounded diagnostics that cannot expose cert bytes, DN or PEM data."""
+    lines=report.splitlines()
+    candidates=[line for line in lines
+                if line.startswith('Signer ') and 'certificate SHA-256' in line]
+    kinds=[];widths=[]
     for line in candidates[:12]:
-        match = SIGNER_SHA256_ROW.fullmatch(line)
-        if match is None:
-            kinds.append('unparsed')
-            widths.append(0)
-            continue
-        label = match.group('label')
-        kinds.append('numbered' if label.startswith('#') else
-                     'sdk-range' if label.startswith('(') else 'other')
-        widths.append(min(len(match.group('digest')), 256))
-    return ('lines='+str(min(len(lines), 9999))+
+        row=SIGNER_SHA256_ROW.fullmatch(line)
+        if row is None:
+            kinds.append('unparsed');widths.append(0)
+        else:
+            label=row.group('label')
+            kinds.append('numbered' if label.startswith('#') else
+                         'sdk-range' if label.startswith('(') else 'other')
+            widths.append(min(len(row.group('digest')),256))
+    return ('lines='+str(min(len(lines),9999))+
             ' sha256_rows='+str(len(candidates))+
             ' label_kinds='+','.join(kinds)+
-            ' digest_widths='+','.join(map(str,widths)))
+            ' digest_widths='+','.join(map(str,widths))+
+            ' pem_blocks='+str(report.count('-----BEGIN CERTIFICATE-----')))
+
+
+def require_single_signer(report: str) -> None:
+    counts=SIGNER_COUNT.findall(report)
+    must(all(x=='1' for x in counts), 'Multiple APK signers detected')
+    for line in report.splitlines():
+        n=re.match(r'^Signer #([0-9]+)(?:\s|$)', line)
+        if n is not None:
+            must(n.group(1)=='1', 'Multiple APK signers detected')
 
 
 def parse_verified_signer_report(report: str) -> str:
-    """Require one trusted certificate identity over every verified SDK range.
-
-    `inspect_tool` must have successfully executed `apksigner verify` first.
-    This function never treats arbitrary text as a signature verification.
-    """
-    candidates = [line for line in report.splitlines()
-                  if line.startswith('Signer ') and 'certificate SHA-256' in line]
-    must(bool(candidates), 'Missing apksigner SHA-256 certificate output')
-    digests: list[str] = []
+    """Parse signer digests from an already successful apksigner verification."""
+    require_single_signer(report)
+    candidates=[line for line in report.splitlines()
+                if line.startswith('Signer ') and 'certificate SHA-256' in line]
+    must(bool(candidates),'Missing apksigner SHA-256 certificate output')
+    digests=[]
     for line in candidates:
-        row = SIGNER_SHA256_ROW.fullmatch(line)
-        must(row is not None, 'Unrecognized apksigner SHA-256 signer row')
-        label = row.group('label')
-        match = SIGNER_NUMBER.fullmatch(label)
+        row=SIGNER_SHA256_ROW.fullmatch(line)
+        must(row is not None,'Unrecognized apksigner SHA-256 signer row')
+        label=row.group('label')
+        match=SIGNER_NUMBER.fullmatch(label)
         if match is not None:
-            must(int(match.group('index')) == 1, 'Multiple APK signers detected')
+            must(int(match.group('index'))==1,'Multiple APK signers detected')
         else:
             must(SIGNER_SDK_RANGE.fullmatch(label) is not None,
                  'Unrecognized apksigner signer label')
-        digest = row.group('digest')
+        digest=row.group('digest')
         if HEX_COLON_SHA256.fullmatch(digest):
-            digest = digest.replace(':', '')
+            digest=digest.replace(':','')
         must(SHA64.fullmatch(digest) is not None,
              'Invalid apksigner SHA-256 certificate digest')
         digests.append(digest.lower())
-
-    # Some tool versions emit an explicit count; do not require it when absent.
-    counts = SIGNER_COUNT.findall(report)
-    must(all(x == '1' for x in counts), 'Multiple APK signers detected')
-    # Reject a second numbered signer even if a tool omitted its SHA-256 row.
-    for line in report.splitlines():
-        n = re.match(r'^Signer #([0-9]+)(?:\s|$)', line)
-        if n is not None:
-            must(n.group(1) == '1', 'Multiple APK signers detected')
-    must(len(set(digests)) == 1,
+    must(len(set(digests))==1,
          'Multiple distinct signing certificates detected across APK SDK ranges')
     return digests[0]
 
 
+def parse_verified_pem_report(report: str) -> str:
+    """Hash the sole verified apksigner PEM, not an unverified APK entry."""
+    import ssl
+    require_single_signer(report)
+    certs=PEM_CERTIFICATE.findall(report)
+    must(len(certs)==1 and report.count('-----BEGIN CERTIFICATE-----')==1 and
+         report.count('-----END CERTIFICATE-----')==1,
+         'Expected exactly one apksigner signing certificate PEM')
+    try:
+        der=ssl.PEM_cert_to_DER_cert(certs[0])
+    except (ValueError, TypeError) as exc:
+        raise Rejected('Invalid verified signing certificate PEM') from exc
+    must(16 <= len(der) <= 16384 and der[0]==0x30,
+         'Invalid verified signing certificate encoding')
+    return hashlib.sha256(der).hexdigest()
+
+
 def inspected_signer(apk: Path) -> str:
-    report = inspect_tool('apksigner', [
-        'verify', '--min-sdk-version', '24', '--verbose', '--print-certs', str(apk)])
+    report=inspect_tool('apksigner', [
+        'verify','--min-sdk-version','24','--verbose','--print-certs',str(apk)])
     try:
         return parse_verified_signer_report(report)
     except Rejected as exc:
-        # No raw apksigner output is logged or persisted, and no fallback
-        # weakens the certificate pin or successful verify requirement.
-        raise Rejected(f'{exc}; apksigner_report_shape={report_shape(report)}') from exc
+        # Do not hide malformed digest rows, invalid labels or extra signers.
+        # The PEM path is allowed only when no digest information is present.
+        if 'certificate SHA-256' in report or 'Multiple APK signers' in str(exc):
+            raise Rejected(f'{exc}; apksigner_report_shape={report_shape(report)}') from exc
+        require_single_signer(report)
+        pem_report=inspect_tool('apksigner', [
+            'verify','--min-sdk-version','24','--verbose','--print-certs-pem',str(apk)])
+        try:
+            return parse_verified_pem_report(pem_report)
+        except Rejected as pem_exc:
+            raise Rejected('Verified apksigner PEM fallback refused: '
+                           +str(pem_exc)+'; apksigner_report_shape='
+                           +report_shape(pem_report)) from pem_exc
 
 def inspected_identity(apk: Path) -> tuple[str,int,str]:
     report=inspect_tool('aapt',['dump','badging',str(apk)])
